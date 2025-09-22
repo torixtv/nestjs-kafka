@@ -1,5 +1,5 @@
 {
-  "name": "@torix/kafka-events",
+  "name": "@torix/nestjs-kafka",
   "version": "0.1.0",
   "description": "A simplified, reusable NestJS Kafka events package with retry and DLQ support",
   "author": "Torix Team",

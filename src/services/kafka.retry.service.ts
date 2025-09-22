@@ -5,22 +5,20 @@ import {
   OnModuleInit,
   OnModuleDestroy,
 } from '@nestjs/common';
-import { Consumer, Kafka, EachMessagePayload, KafkaMessage } from 'kafkajs';
+import { Consumer, Kafka, Admin, ITopicConfig, EachMessagePayload, KafkaMessage } from 'kafkajs';
 import {
   KAFKAJS_INSTANCE,
   KAFKA_MODULE_OPTIONS,
 } from '../core/kafka.constants';
 import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
 import { KafkaHandlerRegistry } from './kafka.registry';
-import { KafkaRetryManager } from './kafka.retry-manager';
-// Removed KafkaDelayManager - using interval-based polling instead
 import { calculateRetryDelay } from '../utils/retry.utils';
 
 export interface RetryMessageHeaders {
   'x-original-topic': string;
   'x-handler-id': string;
   'x-retry-count': string;
-  'x-process-after': string; // Timestamp when message should be processed
+  'x-process-after': string;
   'x-correlation-id'?: string;
   'x-original-partition'?: string;
   'x-original-offset'?: string;
@@ -28,12 +26,13 @@ export interface RetryMessageHeaders {
 }
 
 @Injectable()
-export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(KafkaRetryConsumer.name);
+export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(KafkaRetryService.name);
+  private admin: Admin;
   private consumer: Consumer;
+  private retryTopicName: string;
   private isRunning = false;
 
-  // Metrics for monitoring
   private metrics = {
     messagesProcessed: 0,
     messagesSkipped: 0,
@@ -45,9 +44,10 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
     @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
     @Inject(KAFKA_MODULE_OPTIONS) private readonly options: KafkaModuleOptions,
     private readonly handlerRegistry: KafkaHandlerRegistry,
-    private readonly retryManager: KafkaRetryManager,
   ) {
-    // Create consumer with retry-specific groupId, excluding groupId from spread to prevent overwrite
+    this.admin = this.kafka.admin();
+    this.retryTopicName = this.buildRetryTopicName();
+
     const baseGroupId = this.options.consumer?.groupId || 'kafka-service';
     const { groupId: _, ...consumerOptions } = this.options.consumer || {};
 
@@ -58,51 +58,94 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit(): Promise<void> {
-    this.logger.log(
-      `🔧 KafkaRetryConsumer initialized. Retry enabled: ${this.options.retry?.enabled}`,
-    );
+    await this.ensureRetryTopicExists();
 
     if (this.options.retry?.enabled) {
-      if (this.isRunning) {
-        this.logger.log(
-          'ℹ️ Retry consumer already running, skipping initialization',
-        );
-        return;
-      }
-      this.logger.log('✅ Retry is enabled, starting retry consumer...');
+      this.logger.log('Retry is enabled, starting retry consumer...');
       await this.startRetryConsumer();
     } else {
-      this.logger.log(
-        'ℹ️ Retry is disabled, retry consumer will remain inactive',
-      );
+      this.logger.log('Retry is disabled, retry service will remain inactive');
     }
   }
 
   async onModuleDestroy(): Promise<void> {
     await this.stopRetryConsumer();
+    await this.admin.disconnect();
+  }
+
+  private buildRetryTopicName(): string {
+    const clientId = this.options.client?.clientId || 'kafka-service';
+    return `${clientId}.retry`;
+  }
+
+  private async ensureRetryTopicExists(): Promise<void> {
+    try {
+      await this.admin.connect();
+
+      const existingTopics = await this.admin.listTopics();
+
+      if (existingTopics.includes(this.retryTopicName)) {
+        this.logger.debug(`Retry topic already exists: ${this.retryTopicName}`);
+        return;
+      }
+
+      const topicConfig: ITopicConfig = {
+        topic: this.retryTopicName,
+        numPartitions: this.options.retry?.topicPartitions || 3,
+        replicationFactor: this.options.retry?.topicReplicationFactor || 1,
+        configEntries: [
+          {
+            name: 'cleanup.policy',
+            value: 'delete',
+          },
+          {
+            name: 'retention.ms',
+            value: String(
+              this.options.retry?.topicRetentionMs || 24 * 60 * 60 * 1000,
+            ),
+          },
+          {
+            name: 'segment.ms',
+            value: String(this.options.retry?.topicSegmentMs || 60 * 60 * 1000),
+          },
+        ],
+      };
+
+      await this.admin.createTopics({
+        topics: [topicConfig],
+        waitForLeaders: true,
+      });
+
+      this.logger.log(`Created retry topic: ${this.retryTopicName}`);
+    } catch (error) {
+      this.logger.error(
+        `Failed to ensure retry topic exists: ${this.retryTopicName}`,
+        error,
+      );
+      throw error;
+    } finally {
+      await this.admin.disconnect();
+    }
   }
 
   private async startRetryConsumer(): Promise<void> {
     try {
-      const retryTopicName = this.retryManager.getRetryTopicName();
-      this.logger.log(`Starting retry consumer for topic: ${retryTopicName}`);
+      this.logger.log(`Starting retry consumer for topic: ${this.retryTopicName}`);
 
       await this.consumer.connect();
       await this.consumer.subscribe({
-        topic: retryTopicName,
-        fromBeginning: true, // Read from beginning to catch any missed retry messages
+        topic: this.retryTopicName,
+        fromBeginning: true,
       });
 
-      // Start continuous consumer with timestamp filtering
       await this.consumer.run({
-        autoCommit: false, // Manual offset control
+        autoCommit: false,
         eachMessage: async (payload) => {
           const { message, partition, topic } = payload;
 
           try {
             const headers = this.extractHeaders(message);
             if (!headers) {
-              // Invalid message, commit to skip permanently
               await this.consumer.commitOffsets([
                 {
                   topic,
@@ -120,13 +163,11 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
             const now = Date.now();
 
             if (now >= processAfter) {
-              // Message is ready - process it
               this.logger.log(
-                `🔄 Processing ready retry message - Handler: ${headers['x-handler-id']}, Retry: ${headers['x-retry-count']}`,
+                `Processing ready retry message - Handler: ${headers['x-handler-id']}, Retry: ${headers['x-retry-count']}`,
               );
               await this.processReadyMessage(payload, headers);
 
-              // Commit offset after successful processing
               await this.consumer.commitOffsets([
                 {
                   topic,
@@ -137,14 +178,12 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
 
               this.metrics.messagesProcessed++;
             } else {
-              // Message not ready - don't commit, pause briefly to avoid tight loop
               const delayRemaining = processAfter - now;
               this.logger.debug(
                 `Message not ready, ${delayRemaining}ms remaining`,
               );
               this.metrics.messagesDelayed++;
 
-              // Pause briefly to avoid tight polling loop
               await new Promise((resolve) =>
                 setTimeout(resolve, Math.min(delayRemaining, 5000)),
               );
@@ -153,7 +192,6 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
             this.metrics.errorsEncountered++;
             this.logger.error('Error processing retry message:', error);
 
-            // Commit offset to avoid reprocessing failed message
             await this.consumer.commitOffsets([
               {
                 topic,
@@ -166,9 +204,9 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
       });
 
       this.isRunning = true;
-      this.logger.log(`✅ Retry consumer started for topic: ${retryTopicName}`);
+      this.logger.log(`Retry consumer started for topic: ${this.retryTopicName}`);
     } catch (error) {
-      this.logger.error('❌ Failed to start retry consumer:', error);
+      this.logger.error('Failed to start retry consumer:', error);
       throw error;
     }
   }
@@ -196,14 +234,8 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
       headers;
 
     const retryCount = parseInt(retryCountStr, 10);
-    const messageId = this.createMessageId(message, partition);
-
-    this.logger.log(
-      `🚀 Processing ready retry message for handler: ${handlerId}, retry count: ${retryCount}`,
-    );
 
     try {
-      // Get the handler
       const handler = this.handlerRegistry.getHandler(handlerId);
       if (!handler) {
         this.metrics.messagesSkipped++;
@@ -211,7 +243,6 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // Execute the handler
       await this.executeHandlerWithRetry(handler, message, retryCount);
     } catch (error) {
       this.metrics.errorsEncountered++;
@@ -241,9 +272,6 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
         `Retry execution failed for handler: ${handler.handlerId}:`,
         error,
       );
-
-      // Could implement further retry logic or DLQ handling here
-      // For now, we'll let the message be lost (it's already been retried)
     }
   }
 
@@ -270,7 +298,6 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
       headers[key] = value.toString();
     }
 
-    // Optional headers
     const optionalHeaders: (keyof RetryMessageHeaders)[] = [
       'x-correlation-id',
       'x-original-partition',
@@ -288,29 +315,14 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
     return headers as RetryMessageHeaders;
   }
 
-  private createMessageId(message: KafkaMessage, partition: number): string {
-    const timestamp = message.timestamp || Date.now().toString();
-    const offset = message.offset || '0';
-    return `${partition}-${offset}-${timestamp}`;
+  getRetryTopicName(): string {
+    return this.retryTopicName;
   }
 
-  /**
-   * Get consumer status
-   */
   isRetryConsumerRunning(): boolean {
     return this.isRunning;
   }
 
-  /**
-   * Get consumer instance (for testing)
-   */
-  getConsumer(): Consumer {
-    return this.consumer;
-  }
-
-  /**
-   * Get retry consumer metrics for monitoring
-   */
   getMetrics() {
     return {
       ...this.metrics,
@@ -318,9 +330,6 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  /**
-   * Reset metrics (for testing)
-   */
   resetMetrics() {
     this.metrics = {
       messagesProcessed: 0,
@@ -328,5 +337,60 @@ export class KafkaRetryConsumer implements OnModuleInit, OnModuleDestroy {
       messagesDelayed: 0,
       errorsEncountered: 0,
     };
+  }
+
+  async deleteRetryTopic(): Promise<void> {
+    try {
+      await this.admin.connect();
+      await this.admin.deleteTopics({
+        topics: [this.retryTopicName],
+        timeout: 30000,
+      });
+      this.logger.log(`Deleted retry topic: ${this.retryTopicName}`);
+    } catch (error) {
+      this.logger.error(
+        `Failed to delete retry topic: ${this.retryTopicName}`,
+        error,
+      );
+      throw error;
+    } finally {
+      await this.admin.disconnect();
+    }
+  }
+
+  async getTopicMetadata(): Promise<any> {
+    try {
+      await this.admin.connect();
+      const metadata = await this.admin.fetchTopicMetadata({
+        topics: [this.retryTopicName],
+      });
+      return metadata.topics.find(
+        (topic) => topic.name === this.retryTopicName,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to fetch topic metadata: ${this.retryTopicName}`,
+        error,
+      );
+      throw error;
+    } finally {
+      await this.admin.disconnect();
+    }
+  }
+
+  async retryTopicExists(): Promise<boolean> {
+    try {
+      await this.admin.connect();
+      const topics = await this.admin.listTopics();
+      return topics.includes(this.retryTopicName);
+    } catch (error) {
+      this.logger.error(
+        `Failed to check if retry topic exists: ${this.retryTopicName}`,
+        error,
+      );
+      return false;
+    } finally {
+      await this.admin.disconnect();
+    }
   }
 }

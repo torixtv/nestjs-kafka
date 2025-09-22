@@ -2,9 +2,9 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { KafkaModule } from './kafka.module';
 import { KafkaProducerService } from './kafka.producer';
 import { RetryInterceptor } from '../interceptors/retry.interceptor';
-import { KAFKA_MODULE_OPTIONS, KAFKAJS_INSTANCE, KAFKA_PLUGINS } from './kafka.constants';
+import { KAFKA_MODULE_OPTIONS, KAFKAJS_INSTANCE } from './kafka.constants';
 import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
-import { KafkaRetryConsumer } from '../services/kafka.retry-consumer';
+import { KafkaRetryService } from '../services/kafka.retry.service';
 
 describe('KafkaModule', () => {
   describe('forRoot', () => {
@@ -159,9 +159,9 @@ describe('KafkaModule', () => {
       expect(typeof kafka.producer).toBe('function');
     });
 
-    it('should provide KAFKA_PLUGINS as empty array by default', () => {
-      const plugins = module.get(KAFKA_PLUGINS);
-      expect(plugins).toEqual([]);
+    it('should provide KafkaRetryService', () => {
+      const retryService = module.get<KafkaRetryService>(KafkaRetryService);
+      expect(retryService).toBeInstanceOf(KafkaRetryService);
     });
   });
 
@@ -198,26 +198,6 @@ describe('KafkaModule', () => {
       await module.close();
     });
 
-    it('should handle plugins configuration', async () => {
-      const testPlugin = { name: 'test-plugin' };
-
-      const module = await Test.createTestingModule({
-        imports: [
-          KafkaModule.forRoot({
-            client: {
-              clientId: 'plugin-test',
-              brokers: ['localhost:9092'],
-            },
-            plugins: [testPlugin],
-          }),
-        ],
-      }).compile();
-
-      const plugins = module.get(KAFKA_PLUGINS);
-      expect(plugins).toEqual([testPlugin]);
-
-      await module.close();
-    });
 
     it('should merge retry configuration', async () => {
       const module = await Test.createTestingModule({
@@ -247,9 +227,8 @@ describe('KafkaModule', () => {
     });
   });
 
-  describe('retry consumer initialization', () => {
-    it('should initialize retry consumer when retry is enabled', async () => {
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+  describe('retry service initialization', () => {
+    it('should initialize retry service when retry is enabled', async () => {
       const module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRoot({
@@ -269,21 +248,14 @@ describe('KafkaModule', () => {
       const app = module.createNestApplication();
       await app.init();
 
-      // Get the retry consumer instance
-      const retryConsumer = module.get<KafkaRetryConsumer>(KafkaRetryConsumer);
-      expect(retryConsumer).toBeInstanceOf(KafkaRetryConsumer);
+      // Get the retry service instance
+      const retryService = module.get<KafkaRetryService>(KafkaRetryService);
+      expect(retryService).toBeInstanceOf(KafkaRetryService);
 
-      // The bootstrap service should have logged the retry consumer status
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[KafkaBootstrap] Retry consumer running status:')
-      );
-
-      consoleLogSpy.mockRestore();
       await app.close();
     });
 
     it('should not initialize retry consumer when retry is disabled', async () => {
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
       const module = await Test.createTestingModule({
         imports: [
           KafkaModule.forRoot({
@@ -302,36 +274,11 @@ describe('KafkaModule', () => {
       const app = module.createNestApplication();
       await app.init();
 
-      // Get the retry consumer instance
-      const retryConsumer = module.get<KafkaRetryConsumer>(KafkaRetryConsumer);
-      expect(retryConsumer).toBeInstanceOf(KafkaRetryConsumer);
+      // Get the retry service instance
+      const retryService = module.get<KafkaRetryService>(KafkaRetryService);
+      expect(retryService).toBeInstanceOf(KafkaRetryService);
 
-      // Should not have running status log since retry is disabled
-      expect(consoleLogSpy).not.toHaveBeenCalledWith(
-        expect.stringContaining('[KafkaBootstrap] Retry consumer running status: true')
-      );
-
-      consoleLogSpy.mockRestore();
       await app.close();
-    });
-
-    it('should provide KAFKA_EAGER_INIT token', async () => {
-      const module = await Test.createTestingModule({
-        imports: [
-          KafkaModule.forRoot({
-            client: {
-              clientId: 'eager-init-test',
-              brokers: ['localhost:9092'],
-            },
-          }),
-        ],
-      }).compile();
-
-      // Get the eager init token - this should exist and trigger initialization
-      const eagerInit = module.get('KAFKA_EAGER_INIT');
-      expect(eagerInit).toEqual({ initialized: true });
-
-      await module.close();
     });
   });
 });

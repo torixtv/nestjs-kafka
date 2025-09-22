@@ -52,20 +52,7 @@ export class KafkaHandlerRegistry implements OnModuleInit {
       );
     }
 
-    console.log(
-      `🔍 KafkaHandlerRegistry: Discovered ${this.handlers.size} Kafka event handlers`,
-    );
     this.logger.log(`Discovered ${this.handlers.size} Kafka event handlers`);
-
-    // Debug: Log all discovered handlers
-    this.handlers.forEach((handler, handlerId) => {
-      console.log(
-        `🔍 Handler registered: ${handlerId} -> pattern: ${handler.pattern}`,
-      );
-      this.logger.debug(
-        `Handler registered: ${handlerId} -> pattern: ${handler.pattern}`,
-      );
-    });
   }
 
   private handleMethodDiscovery(instance: any, methodName: string): void {
@@ -88,9 +75,6 @@ export class KafkaHandlerRegistry implements OnModuleInit {
     };
 
     this.handlers.set(handlerId, registeredHandler);
-    this.logger.debug(
-      `Registered handler: ${handlerId} for pattern: ${metadata.pattern}`,
-    );
   }
 
   private createHandlerId(instance: any, methodName: string): string {
@@ -143,7 +127,6 @@ export class KafkaHandlerRegistry implements OnModuleInit {
 
     try {
       const result = await handler.instance[handler.methodName](payload);
-      this.logger.debug(`Handler executed successfully: ${handlerId}`);
       return result;
     } catch (error) {
       this.logger.error(`Handler execution failed: ${handlerId}`, error);

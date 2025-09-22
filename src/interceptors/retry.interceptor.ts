@@ -11,8 +11,7 @@ import { catchError } from 'rxjs/operators';
 import { Reflector } from '@nestjs/core';
 import { KafkaContext } from '@nestjs/microservices';
 
-import { EVENT_HANDLER_METADATA, KAFKA_PLUGINS } from '../core/kafka.constants';
-import { KafkaPlugin } from '../interfaces/kafka.interfaces';
+import { EVENT_HANDLER_METADATA } from '../core/kafka.constants';
 import {
   calculateRetryDelay,
   getRetryCountFromHeaders,
@@ -20,7 +19,7 @@ import {
   createMessageId,
 } from '../utils/retry.utils';
 import { KafkaProducerService } from '../core/kafka.producer';
-import { KafkaRetryManager } from '../services/kafka.retry-manager';
+import { KafkaRetryService } from '../services/kafka.retry.service';
 import { KafkaHandlerRegistry } from '../services/kafka.registry';
 
 @Injectable()
@@ -30,9 +29,8 @@ export class RetryInterceptor implements NestInterceptor {
   constructor(
     private readonly reflector: Reflector,
     private readonly producer: KafkaProducerService,
-    private readonly retryManager: KafkaRetryManager,
+    private readonly retryService: KafkaRetryService,
     private readonly handlerRegistry: KafkaHandlerRegistry,
-    @Inject(KAFKA_PLUGINS) private readonly plugins: KafkaPlugin[] = [],
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
@@ -49,24 +47,12 @@ export class RetryInterceptor implements NestInterceptor {
 
     if (!handlerMetadata?.options?.retry?.enabled) {
       // No retry configuration, just execute normally
-      return this.executeWithPlugins(context, next);
+      return next.handle();
     }
 
     return this.executeWithRetry(context, next, handlerMetadata);
   }
 
-  private executeWithPlugins(
-    context: ExecutionContext,
-    next: CallHandler,
-  ): Observable<any> {
-    return next.handle().pipe(
-      catchError(async (error) => {
-        // Run failure plugins
-        await this.runPluginHooks('onFailure', context, error);
-        throw error;
-      }),
-    );
-  }
 
   private executeWithRetry(
     context: ExecutionContext,
@@ -105,8 +91,6 @@ export class RetryInterceptor implements NestInterceptor {
           error: error.message,
         });
 
-        // Run failure plugins
-        await this.runPluginHooks('onFailure', context, error);
 
         // Check if we should retry
         if (retryCount < retryOptions.attempts) {
@@ -176,7 +160,7 @@ export class RetryInterceptor implements NestInterceptor {
     handlerMetadata: any,
   ): Promise<void> {
     try {
-      const retryTopicName = this.retryManager.getRetryTopicName();
+      const retryTopicName = this.retryService.getRetryTopicName();
       const handlerId = this.createHandlerId(handlerMetadata);
 
       const processAfter = Date.now() + delayMs;
@@ -249,18 +233,29 @@ export class RetryInterceptor implements NestInterceptor {
     context: any,
   ): Promise<void> {
     try {
-      // Find DLQ plugin if available
-      const dlqPlugin = this.plugins.find((p) => p.name === 'dlq');
-      if (dlqPlugin && 'handleFailure' in dlqPlugin) {
-        await (dlqPlugin as any).handleFailure(message, error);
-      } else {
-        this.logger.warn('DLQ enabled but no DLQ plugin available', {
-          messageId: context.messageId,
-          topic: context.topic,
-        });
-      }
+      const dlqTopic = dlqOptions.topic || this.buildDlqTopicName(context.topic);
+
+      const dlqMessage = {
+        key: message.key,
+        value: this.buildDlqPayload(message, error),
+        headers: {
+          ...message.headers,
+          'x-dlq-timestamp': new Date().toISOString(),
+          'x-dlq-reason': error.message,
+          'x-original-topic': context.topic,
+        },
+      };
+
+      await this.producer.send(dlqTopic, dlqMessage);
+
+      this.logger.log('Message sent to DLQ', {
+        dlqTopic,
+        originalTopic: context.topic,
+        messageId: context.messageId,
+        errorReason: error.message,
+      });
     } catch (dlqError) {
-      this.logger.error('Failed to handle DLQ', {
+      this.logger.error('Failed to send message to DLQ', {
         messageId: context.messageId,
         originalError: error.message,
         dlqError: dlqError.message,
@@ -268,22 +263,30 @@ export class RetryInterceptor implements NestInterceptor {
     }
   }
 
-  private async runPluginHooks(
-    hookName: keyof KafkaPlugin,
-    context: ExecutionContext,
-    ...args: any[]
-  ): Promise<void> {
-    for (const plugin of this.plugins) {
-      try {
-        if (typeof plugin[hookName] === 'function') {
-          await (plugin[hookName] as Function)(...args);
-        }
-      } catch (error) {
-        this.logger.warn(
-          `Plugin ${plugin.name} hook ${hookName} failed`,
-          error.message,
-        );
-      }
-    }
+  private buildDlqTopicName(originalTopic: string): string {
+    return `dlq.${originalTopic}`;
   }
+
+  private buildDlqPayload(message: any, error: Error): any {
+    return {
+      originalMessage: {
+        value: message.value,
+        headers: message.headers,
+        timestamp: message.timestamp,
+        offset: message.offset,
+        partition: message.partition,
+      },
+      error: {
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+        timestamp: new Date().toISOString(),
+      },
+      dlqMetadata: {
+        processedAt: new Date().toISOString(),
+        version: '1.0.0',
+      },
+    };
+  }
+
 }

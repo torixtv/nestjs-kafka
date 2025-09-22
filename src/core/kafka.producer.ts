@@ -7,8 +7,7 @@ import {
 } from '@nestjs/common';
 import { Kafka, Producer, ProducerRecord, Message } from 'kafkajs';
 
-import { KAFKAJS_INSTANCE, KAFKA_PLUGINS } from './kafka.constants';
-import { KafkaPlugin } from '../interfaces/kafka.interfaces';
+import { KAFKAJS_INSTANCE } from './kafka.constants';
 
 export interface MessagePayload {
   key?: string;
@@ -26,7 +25,6 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
-    @Inject(KAFKA_PLUGINS) private readonly plugins: KafkaPlugin[] = [],
   ) {
     this.producer = this.kafka.producer();
   }

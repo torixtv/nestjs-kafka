@@ -5,20 +5,16 @@ import { Kafka } from 'kafkajs';
 import {
   KAFKA_MODULE_OPTIONS,
   KAFKAJS_INSTANCE,
-  KAFKA_PLUGINS,
 } from './kafka.constants';
 import {
   KafkaModuleAsyncOptions,
   KafkaModuleOptions,
   KafkaModuleOptionsFactory,
-  KafkaPlugin,
 } from '../interfaces/kafka.interfaces';
 import { KafkaProducerService } from './kafka.producer';
 import { RetryInterceptor } from '../interceptors/retry.interceptor';
 import { KafkaHandlerRegistry } from '../services/kafka.registry';
-import { KafkaRetryManager } from '../services/kafka.retry-manager';
-import { KafkaRetryConsumer } from '../services/kafka.retry-consumer';
-import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
+import { KafkaRetryService } from '../services/kafka.retry.service';
 
 @Global()
 @Module({
@@ -50,12 +46,9 @@ export class KafkaModule {
         KafkaProducerService,
         RetryInterceptor,
         KafkaHandlerRegistry,
-        KafkaRetryManager,
-        KafkaRetryConsumer,
-        KafkaBootstrapService,
+        KafkaRetryService,
         KAFKA_MODULE_OPTIONS,
         KAFKAJS_INSTANCE,
-        KAFKA_PLUGINS,
       ],
     };
   }
@@ -129,19 +122,10 @@ export class KafkaModule {
           return new Kafka(options.client);
         },
       },
-      {
-        provide: KAFKA_PLUGINS,
-        inject: [KAFKA_MODULE_OPTIONS],
-        useFactory: (options: KafkaModuleOptions) => {
-          return options.plugins || [];
-        },
-      },
       KafkaHandlerRegistry,
-      KafkaRetryManager,
-      KafkaRetryConsumer,
+      KafkaRetryService,
       KafkaProducerService,
       RetryInterceptor,
-      KafkaBootstrapService,
     ];
   }
 
@@ -172,7 +156,6 @@ export class KafkaModule {
       dlq: {
         enabled: false,
       },
-      plugins: [],
     };
 
     const mergedClient = userOptions.client
@@ -199,7 +182,6 @@ export class KafkaModule {
       dlq: userOptions.dlq
         ? { ...defaults.dlq, ...userOptions.dlq }
         : defaults.dlq,
-      plugins: [...(defaults.plugins || []), ...(userOptions.plugins || [])],
     };
   }
 }

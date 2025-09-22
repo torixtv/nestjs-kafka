@@ -32,7 +32,6 @@ export interface KafkaModuleOptions {
   retry?: KafkaRetryOptions;
   dlq?: KafkaDlqOptions;
   requireBroker?: boolean;
-  plugins?: KafkaPlugin[];
 }
 
 export interface KafkaModuleOptionsFactory {
@@ -50,17 +49,6 @@ export interface KafkaModuleAsyncOptions
   extraProviders?: any[];
 }
 
-export interface KafkaPlugin {
-  name: string;
-  initialize?(moduleOptions: KafkaModuleOptions): Promise<void> | void;
-  beforeConsume?(message: any): Promise<void> | void;
-  afterConsume?(
-    message: any,
-    result?: any,
-    error?: Error,
-  ): Promise<void> | void;
-  onFailure?(message: any, error: Error): Promise<void> | void;
-}
 
 export interface EventHandlerOptions {
   retry?: KafkaRetryOptions;

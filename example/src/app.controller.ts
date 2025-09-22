@@ -1,28 +1,21 @@
 import { Controller, Get, Post, Body, Param, Logger, Injectable } from '@nestjs/common';
-import { KafkaController } from '../../src/core/kafka.controller';
 import { EventHandler } from '../../src/decorators/event-handler.decorator';
 import { KafkaProducerService } from '../../src/core/kafka.producer';
-import { KafkaBootstrapService } from '../../src/services/kafka.bootstrap.service';
 import { KafkaHandlerRegistry } from '../../src/services/kafka.registry';
-import { KafkaRetryConsumer } from '../../src/services/kafka.retry-consumer';
-import { KafkaRetryManager } from '../../src/services/kafka.retry-manager';
+import { KafkaRetryService } from '../../src/services/kafka.retry.service';
 import { AppService } from './app.service';
 
 @Injectable()
 @Controller()
-export class AppController extends KafkaController {
+export class AppController {
   private readonly logger = new Logger(AppController.name);
 
   constructor(
     private readonly appService: AppService,
     private readonly kafkaProducer: KafkaProducerService,
-    private readonly bootstrapService: KafkaBootstrapService,
     private readonly handlerRegistry: KafkaHandlerRegistry,
-    private readonly retryConsumer: KafkaRetryConsumer,
-    private readonly retryManager: KafkaRetryManager,
-  ) {
-    super();
-  }
+    private readonly retryService: KafkaRetryService,
+  ) {}
 
   // === Kafka Event Handlers ===
 
@@ -116,16 +109,15 @@ export class AppController extends KafkaController {
 
   @Get('health')
   getHealth() {
-    const bootstrapStatus = this.bootstrapService.getServiceStatus();
-    const retryMetrics = this.retryConsumer.getMetrics();
+    const retryMetrics = this.retryService.getMetrics();
 
     return {
       status: 'healthy',
       timestamp: new Date().toISOString(),
       kafka: {
-        bootstrap: bootstrapStatus,
-        retryConsumer: retryMetrics,
-        retryTopic: this.retryManager.getRetryTopicName(),
+        retryService: retryMetrics,
+        retryTopic: this.retryService.getRetryTopicName(),
+        retryConsumerRunning: this.retryService.isRetryConsumerRunning(),
       },
       application: {
         uptime: process.uptime(),
@@ -138,7 +130,7 @@ export class AppController extends KafkaController {
   @Get('metrics')
   getMetrics() {
     const appStats = this.appService.getStats();
-    const retryMetrics = this.retryConsumer.getMetrics();
+    const retryMetrics = this.retryService.getMetrics();
 
     return {
       timestamp: new Date().toISOString(),
@@ -154,19 +146,17 @@ export class AppController extends KafkaController {
   @Get('debug')
   getDebug() {
     const handlers = this.handlerRegistry.getAllHandlers();
-    const bootstrapStatus = this.bootstrapService.getServiceStatus();
 
     return {
       timestamp: new Date().toISOString(),
-      bootstrap: bootstrapStatus,
       handlers: handlers.map(h => ({
         id: h.handlerId,
         pattern: h.pattern,
         metadata: h.metadata,
         className: h.instance.constructor.name,
       })),
-      retryTopic: this.retryManager.getRetryTopicName(),
-      retryConsumerRunning: this.retryConsumer.isRetryConsumerRunning(),
+      retryTopic: this.retryService.getRetryTopicName(),
+      retryConsumerRunning: this.retryService.isRetryConsumerRunning(),
       environment: {
         nodeEnv: process.env.NODE_ENV,
         kafkaBrokers: process.env.KAFKA_BROKERS || 'localhost:9092',
@@ -262,7 +252,7 @@ export class AppController extends KafkaController {
   @Post('reset')
   reset() {
     this.appService.reset();
-    this.retryConsumer.resetMetrics();
+    this.retryService.resetMetrics();
 
     return {
       success: true,

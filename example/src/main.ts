@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
-import { registerKafkaMicroservice, startKafkaMicroservice } from '../../src/core/kafka.bootstrap';
+import { Transport } from '@nestjs/microservices';
 
 async function bootstrap() {
   const logger = new Logger('ExampleApp');
@@ -18,8 +18,16 @@ async function bootstrap() {
 
   // Register Kafka microservice
   logger.log('📡 Registering Kafka microservice...');
-  await registerKafkaMicroservice(app as any, {
-    overrides: {
+  app.connectMicroservice({
+    transport: Transport.KAFKA,
+    options: {
+      client: {
+        clientId: 'kafka-retry-example',
+        brokers: [process.env.KAFKA_BROKERS || 'localhost:9092'],
+      },
+      consumer: {
+        groupId: 'kafka-retry-example-group',
+      },
       subscribe: {
         topics: [
           'example.immediate.success',
@@ -37,9 +45,9 @@ async function bootstrap() {
   await app.listen(port);
   logger.log(`🌐 HTTP server listening on port ${port}`);
 
-  // Start Kafka microservice (includes bootstrap service initialization)
-  logger.log('🔧 Starting Kafka microservice with bootstrap service...');
-  await startKafkaMicroservice(app as any);
+  // Start Kafka microservice
+  logger.log('🔧 Starting Kafka microservice...');
+  await app.startAllMicroservices();
 
   logger.log('✅ Example application fully started and ready!');
   logger.log(`📋 Health check: http://localhost:${port}/health`);
