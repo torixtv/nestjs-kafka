@@ -34,6 +34,8 @@ async function bootstrap() {
           'example.retry.success',
           'example.always.fail',
           'example.manual.test',
+          'example.dlq.test',
+          'example.dlq.disabled',
         ],
         fromBeginning: true,
       },

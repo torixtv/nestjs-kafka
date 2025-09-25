@@ -5,14 +5,23 @@ import {
   OnModuleInit,
   OnModuleDestroy,
 } from '@nestjs/common';
-import { Consumer, Kafka, Admin, ITopicConfig, EachMessagePayload, KafkaMessage } from 'kafkajs';
+import {
+  Consumer,
+  Kafka,
+  Admin,
+  ITopicConfig,
+  EachMessagePayload,
+  KafkaMessage,
+} from 'kafkajs';
 import {
   KAFKAJS_INSTANCE,
   KAFKA_MODULE_OPTIONS,
 } from '../core/kafka.constants';
 import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
 import { KafkaHandlerRegistry } from './kafka.registry';
+import { KafkaDlqService } from './kafka.dlq.service';
 import { calculateRetryDelay } from '../utils/retry.utils';
+import { KafkaRetryOptions } from '../interfaces/kafka.interfaces';
 
 export interface RetryMessageHeaders {
   'x-original-topic': string;
@@ -23,6 +32,31 @@ export interface RetryMessageHeaders {
   'x-original-partition'?: string;
   'x-original-offset'?: string;
   'x-original-timestamp'?: string;
+}
+
+export interface RetryContext {
+  originalMessage: KafkaMessage;
+  topic: string;
+  attempt: number;
+  error: Error;
+  timestamp: Date;
+  correlationId?: string;
+}
+
+export interface RetryConfiguration {
+  enabled: boolean;
+  maxAttempts: number;
+  strategy: 'exponential' | 'linear' | 'fixed';
+  initialDelay: number;
+  maxDelay: number;
+  multiplier: number;
+}
+
+export interface RetryDecision {
+  shouldRetry: boolean;
+  nextAttempt?: number;
+  delay?: number;
+  reason: string;
 }
 
 @Injectable()
@@ -44,6 +78,7 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
     @Inject(KAFKA_MODULE_OPTIONS) private readonly options: KafkaModuleOptions,
     private readonly handlerRegistry: KafkaHandlerRegistry,
+    private readonly dlqService: KafkaDlqService,
   ) {
     this.admin = this.kafka.admin();
     this.retryTopicName = this.buildRetryTopicName();
@@ -130,7 +165,9 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
 
   private async startRetryConsumer(): Promise<void> {
     try {
-      this.logger.log(`Starting retry consumer for topic: ${this.retryTopicName}`);
+      this.logger.log(
+        `Starting retry consumer for topic: ${this.retryTopicName}`,
+      );
 
       await this.consumer.connect();
       await this.consumer.subscribe({
@@ -180,13 +217,28 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
             } else {
               const delayRemaining = processAfter - now;
               this.logger.debug(
-                `Message not ready, ${delayRemaining}ms remaining`,
+                `Message not ready, ${delayRemaining}ms remaining - will wait and process`,
               );
               this.metrics.messagesDelayed++;
 
-              await new Promise((resolve) =>
-                setTimeout(resolve, Math.min(delayRemaining, 5000)),
+              // Wait for the full delay, then process the message
+              await new Promise((resolve) => setTimeout(resolve, delayRemaining));
+
+              // Now process the message after the delay
+              this.logger.log(
+                `Delay elapsed, processing retry message - Handler: ${headers['x-handler-id']}, Retry: ${headers['x-retry-count']}`,
               );
+              await this.processReadyMessage(payload, headers);
+
+              await this.consumer.commitOffsets([
+                {
+                  topic,
+                  partition,
+                  offset: (parseInt(message.offset) + 1).toString(),
+                },
+              ]);
+
+              this.metrics.messagesProcessed++;
             }
           } catch (error) {
             this.metrics.errorsEncountered++;
@@ -204,7 +256,9 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
       });
 
       this.isRunning = true;
-      this.logger.log(`Retry consumer started for topic: ${this.retryTopicName}`);
+      this.logger.log(
+        `Retry consumer started for topic: ${this.retryTopicName}`,
+      );
     } catch (error) {
       this.logger.error('Failed to start retry consumer:', error);
       throw error;
@@ -243,7 +297,7 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      await this.executeHandlerWithRetry(handler, message, retryCount);
+      await this.executeHandlerWithRetry(handler, message, retryCount, headers);
     } catch (error) {
       this.metrics.errorsEncountered++;
       this.logger.error(
@@ -257,6 +311,7 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     handler: any,
     message: KafkaMessage,
     currentRetryCount: number,
+    headers: RetryMessageHeaders,
   ): Promise<void> {
     try {
       const payload = message.value
@@ -272,6 +327,71 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
         `Retry execution failed for handler: ${handler.handlerId}:`,
         error,
       );
+
+      // Check if this is the final retry attempt and DLQ is enabled
+      const handlerConfig = this.handlerRegistry.getHandler(handler.handlerId);
+      if (handlerConfig) {
+        const maxRetries = handlerConfig.metadata.options?.retry?.attempts || 0;
+
+        if (currentRetryCount >= maxRetries) {
+          // Max retries exceeded - send to DLQ if enabled
+          if (handlerConfig.metadata.options?.dlq?.enabled) {
+          this.logger.log('Max retries exceeded, sending to DLQ', {
+            handlerId: handler.handlerId,
+            retryCount: currentRetryCount,
+            maxRetries,
+          });
+
+          try {
+            await this.dlqService.storeToDlq(
+              message,
+              error,
+              headers['x-original-topic'],
+              handler.handlerId,
+              currentRetryCount,
+              headers['x-correlation-id'],
+            );
+
+            this.logger.log('Message sent to centralized DLQ', {
+              dlqTopic: this.dlqService.getDlqTopicName(),
+              originalTopic: headers['x-original-topic'],
+              handlerId: handler.handlerId,
+              errorReason: error.message,
+            });
+          } catch (dlqError) {
+            this.logger.error('Failed to send message to centralized DLQ', {
+              originalTopic: headers['x-original-topic'],
+              originalError: error.message,
+              dlqError: dlqError.message,
+            });
+          }
+          } else {
+            this.logger.warn('Max retries exceeded but DLQ not enabled', {
+              handlerId: handler.handlerId,
+              retryCount: currentRetryCount,
+              maxRetries,
+            });
+          }
+        } else {
+          // Retry limit not exceeded - schedule another retry
+          this.logger.log('Scheduling additional retry', {
+            handlerId: handler.handlerId,
+            retryCount: currentRetryCount,
+            nextRetryCount: currentRetryCount + 1,
+            maxRetries,
+          });
+
+          try {
+            await this.scheduleAdditionalRetry(message, headers, error, currentRetryCount + 1, handlerConfig.metadata.options);
+          } catch (scheduleError) {
+            this.logger.error('Failed to schedule additional retry', {
+              handlerId: handler.handlerId,
+              originalError: error.message,
+              scheduleError: scheduleError.message,
+            });
+          }
+        }
+      }
     }
   }
 
@@ -392,5 +512,270 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     } finally {
       await this.admin.disconnect();
     }
+  }
+
+  /**
+   * Schedule an additional retry when a retry attempt fails
+   * This replicates the RetryInterceptor logic for retry attempts
+   */
+  private async scheduleAdditionalRetry(
+    message: KafkaMessage,
+    headers: RetryMessageHeaders,
+    error: Error,
+    nextRetryCount: number,
+    options: any,
+  ): Promise<void> {
+    // Calculate delay for next retry
+    const delay = calculateRetryDelay({
+      attempt: nextRetryCount,
+      baseDelay: options.retry?.baseDelay || 1000,
+      maxDelay: options.retry?.maxDelay || 30000,
+      backoff: options.retry?.backoff || 'exponential',
+      jitter: true,
+    });
+
+    const processAfter = Date.now() + delay;
+
+    // Create retry headers for the next attempt
+    const retryHeaders: Record<string, string> = {
+      'x-original-topic': headers['x-original-topic'],
+      'x-handler-id': headers['x-handler-id'],
+      'x-retry-count': nextRetryCount.toString(),
+      'x-process-after': processAfter.toString(),
+      'x-original-partition': headers['x-original-partition'] || '0',
+      'x-original-offset': headers['x-original-offset'] || message.offset,
+      'x-original-timestamp': headers['x-original-timestamp'] || message.timestamp || Date.now().toString(),
+    };
+
+    if (headers['x-correlation-id']) {
+      retryHeaders['x-correlation-id'] = headers['x-correlation-id'];
+    }
+
+    // Copy original headers (excluding retry headers)
+    if (message.headers) {
+      for (const [key, value] of Object.entries(message.headers)) {
+        if (!key.startsWith('x-retry-') && !key.startsWith('x-original-') && !key.startsWith('x-dlq-')) {
+          retryHeaders[key] = value ? value.toString() : '';
+        }
+      }
+    }
+
+    // Send to retry topic for the next attempt
+    const producer = this.kafka.producer();
+    await producer.connect();
+
+    try {
+      await producer.send({
+        topic: this.retryTopicName,
+        messages: [{
+          key: message.key,
+          value: message.value,
+          headers: retryHeaders,
+        }],
+      });
+
+      this.logger.log('Additional retry scheduled successfully', {
+        nextRetryCount,
+        processAfter: new Date(processAfter).toISOString(),
+        delay,
+      });
+    } finally {
+      await producer.disconnect();
+    }
+  }
+
+  // ===== Utility Methods (merged from KafkaRetryLogicService) =====
+
+  /**
+   * Determine if a message should be retried based on attempt count and configuration
+   */
+  shouldRetry(attempt: number, config: KafkaRetryOptions): RetryDecision {
+    const maxAttempts = config.attempts || 3;
+
+    if (!config.enabled) {
+      return {
+        shouldRetry: false,
+        reason: 'Retry is disabled in configuration',
+      };
+    }
+
+    if (attempt >= maxAttempts) {
+      return {
+        shouldRetry: false,
+        reason: `Max attempts reached (${attempt}/${maxAttempts})`,
+      };
+    }
+
+    const nextAttempt = attempt + 1;
+    const delay = this.calculateDelay(nextAttempt, config);
+
+    return {
+      shouldRetry: true,
+      nextAttempt,
+      delay,
+      reason: `Retry attempt ${nextAttempt}/${maxAttempts}`,
+    };
+  }
+
+  /**
+   * Calculate delay for a retry attempt
+   */
+  calculateDelay(attempt: number, config: KafkaRetryOptions): number {
+    const {
+      backoff = 'exponential',
+      baseDelay = 1000,
+      maxDelay = 30000,
+    } = config;
+
+    return calculateRetryDelay({
+      attempt,
+      baseDelay,
+      maxDelay,
+      backoff,
+      jitter: true,
+    });
+  }
+
+  /**
+   * Create a retry context from a failed message processing attempt
+   */
+  createRetryContext(
+    message: KafkaMessage,
+    topic: string,
+    attempt: number,
+    error: Error,
+    correlationId?: string,
+  ): RetryContext {
+    return {
+      originalMessage: message,
+      topic,
+      attempt,
+      error,
+      timestamp: new Date(),
+      correlationId,
+    };
+  }
+
+  /**
+   * Get retry configuration with defaults merged from module options
+   */
+  getRetryConfiguration(overrides?: Partial<KafkaRetryOptions>): RetryConfiguration {
+    const defaults = this.options.retry || {};
+    const merged = { ...defaults, ...overrides };
+
+    return {
+      enabled: merged.enabled || false,
+      maxAttempts: merged.attempts || 3,
+      strategy: merged.backoff || 'exponential',
+      initialDelay: merged.baseDelay || 1000,
+      maxDelay: merged.maxDelay || 30000,
+      multiplier: 2, // Fixed multiplier for exponential backoff
+    };
+  }
+
+  /**
+   * Extract retry count from message headers
+   */
+  extractRetryCount(headers: Record<string, any> = {}): number {
+    const retryCount = headers['x-retry-count'];
+    if (retryCount) {
+      const parsed = parseInt(String(retryCount), 10);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }
+
+  /**
+   * Extract correlation ID from message headers
+   */
+  extractCorrelationId(headers: Record<string, any> = {}): string | undefined {
+    return headers['x-correlation-id'] || headers['correlationId'];
+  }
+
+  /**
+   * Check if a retry message is ready to be processed based on timestamp
+   */
+  isRetryReady(headers: Record<string, any> = {}): boolean {
+    const processAfter = headers['x-process-after'];
+    if (!processAfter) {
+      // No delay specified, process immediately
+      return true;
+    }
+
+    const processAfterTime = parseInt(String(processAfter), 10);
+    if (isNaN(processAfterTime)) {
+      this.logger.warn('Invalid x-process-after header, processing immediately');
+      return true;
+    }
+
+    return Date.now() >= processAfterTime;
+  }
+
+  /**
+   * Calculate remaining delay time for a retry message
+   */
+  getRemainingDelay(headers: Record<string, any> = {}): number {
+    const processAfter = headers['x-process-after'];
+    if (!processAfter) {
+      return 0;
+    }
+
+    const processAfterTime = parseInt(String(processAfter), 10);
+    if (isNaN(processAfterTime)) {
+      return 0;
+    }
+
+    const remaining = processAfterTime - Date.now();
+    return Math.max(remaining, 0);
+  }
+
+  /**
+   * Get retry topic name for a given original topic
+   */
+  getRetryTopicNameForTopic(originalTopic: string): string {
+    return `${originalTopic}.retry`;
+  }
+
+  /**
+   * Validate retry configuration
+   */
+  validateRetryConfig(config: KafkaRetryOptions): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    if (config.enabled && config.attempts && config.attempts < 1) {
+      errors.push('Retry attempts must be >= 1 when retry is enabled');
+    }
+
+    if (config.baseDelay && config.baseDelay < 0) {
+      errors.push('Base delay must be >= 0');
+    }
+
+    if (config.maxDelay && config.maxDelay < 0) {
+      errors.push('Max delay must be >= 0');
+    }
+
+    if (config.baseDelay && config.maxDelay && config.baseDelay > config.maxDelay) {
+      errors.push('Base delay cannot be greater than max delay');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    };
+  }
+
+  /**
+   * Get retry statistics for monitoring
+   */
+  getRetryStats(): {
+    defaultConfig: RetryConfiguration;
+    globalRetryTopic: string;
+    metrics: any;
+  } {
+    return {
+      defaultConfig: this.getRetryConfiguration(),
+      globalRetryTopic: this.getRetryTopicName(),
+      metrics: this.getMetrics(),
+    };
   }
 }

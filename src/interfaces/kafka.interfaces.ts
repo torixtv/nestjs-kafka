@@ -18,9 +18,20 @@ export interface KafkaRetryOptions {
   topicSegmentMs?: number;
 }
 
+export interface KafkaDlqReprocessingOptions {
+  batchSize?: number;
+  timeoutMs?: number;
+  stopOnError?: boolean;
+}
+
 export interface KafkaDlqOptions {
   enabled?: boolean;
   topic?: string;
+  topicPartitions?: number;
+  topicReplicationFactor?: number;
+  topicRetentionMs?: number;
+  topicSegmentMs?: number;
+  reprocessingOptions?: KafkaDlqReprocessingOptions;
   onFailure?: (message: any, error: Error) => Promise<void>;
 }
 
@@ -32,6 +43,7 @@ export interface KafkaModuleOptions {
   retry?: KafkaRetryOptions;
   dlq?: KafkaDlqOptions;
   requireBroker?: boolean;
+  serviceName?: string;  // Service name for consumer group generation
 }
 
 export interface KafkaModuleOptionsFactory {
@@ -48,7 +60,6 @@ export interface KafkaModuleAsyncOptions
   inject?: any[];
   extraProviders?: any[];
 }
-
 
 export interface EventHandlerOptions {
   retry?: KafkaRetryOptions;

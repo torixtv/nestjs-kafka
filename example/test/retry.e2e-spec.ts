@@ -2,10 +2,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
+import { KafkaDlqService } from '../../src/services/kafka.dlq.service';
+import DlqTestHelper from './helpers/dlq-test.helper';
 
 describe('Kafka Retry Mechanism (E2E)', () => {
   let app: INestApplication;
   let httpServer: any;
+  let dlqService: KafkaDlqService;
+  let dlqHelper: DlqTestHelper;
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -15,6 +19,10 @@ describe('Kafka Retry Mechanism (E2E)', () => {
     app = moduleFixture.createNestApplication();
     await app.init();
     httpServer = app.getHttpServer();
+
+    // Initialize DLQ service and helper
+    dlqService = app.get<KafkaDlqService>(KafkaDlqService);
+    dlqHelper = new DlqTestHelper(app, httpServer);
   }, 60000); // 60 second timeout for app startup
 
   afterAll(async () => {
@@ -269,5 +277,119 @@ describe('Kafka Retry Mechanism (E2E)', () => {
       expect(debugResponse.body.retryTopic).toBeTruthy();
       expect(debugResponse.body.retryTopic).toMatch(/\.retry$/);
     });
+
+    it('should have DLQ properly initialized and integrated', async () => {
+      const debugResponse = await request(httpServer)
+        .get('/debug')
+        .expect(200);
+
+      // DLQ should be initialized
+      expect(debugResponse.body.dlq).toBeDefined();
+      expect(debugResponse.body.dlq.enabled).toBe(true);
+      expect(debugResponse.body.dlq.topicName).toMatch(/\.dlq$/);
+      expect(debugResponse.body.dlq.isReprocessing).toBe(false);
+
+      // DLQ topic should exist
+      const topicExists = await dlqHelper.dlqTopicExists();
+      expect(topicExists).toBe(true);
+
+      // Verify topic naming pattern
+      dlqHelper.verifyDlqTopicNaming('kafka-retry-example');
+    });
+  });
+
+  describe('DLQ Integration with Retry Mechanism', () => {
+    it('should send failed messages to DLQ after max retries exceeded', async () => {
+      // Send message that will always fail and go to DLQ
+      const testId = await dlqHelper.sendDlqTestMessage();
+
+      // Wait for retries and DLQ processing
+      await dlqHelper.waitForDlqProcessing(1, 12000);
+
+      // Verify DLQ metrics
+      const metrics = dlqHelper.getDlqMetrics();
+      expect(metrics.messagesStored).toBeGreaterThan(0);
+
+      // Verify in health endpoint
+      const dlqHealth = await dlqHelper.verifyDlqInHealthEndpoint();
+      expect(dlqHealth.metrics.messagesStored).toBeGreaterThan(0);
+    }, 20000);
+
+    it('should integrate DLQ information in monitoring endpoints', async () => {
+      // Verify DLQ in health endpoint
+      const healthResponse = await request(httpServer)
+        .get('/health')
+        .expect(200);
+
+      expect(healthResponse.body.kafka.dlq).toBeDefined();
+      expect(healthResponse.body.kafka.dlq.enabled).toBe(true);
+      expect(healthResponse.body.kafka.dlq.topicName).toBe('kafka-retry-example.dlq');
+
+      // Verify DLQ in debug endpoint
+      const debugResponse = await request(httpServer)
+        .get('/debug')
+        .expect(200);
+
+      expect(debugResponse.body.dlq).toBeDefined();
+      expect(debugResponse.body.dlq.enabled).toBe(true);
+
+      // Verify DLQ metrics endpoint
+      const metricsResponse = await request(httpServer)
+        .get('/dlq/metrics')
+        .expect(200);
+
+      expect(metricsResponse.body).toHaveProperty('messagesStored');
+      expect(metricsResponse.body).toHaveProperty('messagesReprocessed');
+      expect(metricsResponse.body).toHaveProperty('dlqTopicName');
+    });
+
+    it('should handle DLQ reprocessing workflow', async () => {
+      // Create DLQ scenario with reprocessing
+      const result = await dlqHelper.createDlqTestScenario({
+        messageCount: 2,
+        waitForDlq: true,
+        reprocessAfter: true,
+        reprocessOptions: {
+          batchSize: 5,
+          timeoutMs: 10000,
+          stopOnError: false,
+        },
+      });
+
+      expect(result.messagesSentToDlq).toBe(2);
+      expect(result.reprocessingResults).toBeDefined();
+      expect(result.reprocessingResults.messagesReprocessed).toBeGreaterThan(0);
+    }, 30000);
+
+    it('should prevent concurrent reprocessing sessions', async () => {
+      await dlqHelper.testConcurrentReprocessingPrevention();
+    }, 25000);
+
+    it('should handle reprocessing timeout correctly', async () => {
+      await dlqHelper.testReprocessingTimeout(3000);
+    }, 10000);
+
+    it('should track DLQ metrics accurately', async () => {
+      // Reset to clean state
+      await dlqHelper.resetDlqState();
+
+      const initialMetrics = dlqHelper.getDlqMetrics();
+      expect(initialMetrics.messagesStored).toBe(0);
+
+      // Send messages to DLQ
+      const messageIds = await dlqHelper.sendMultipleDlqMessages(3);
+      await dlqHelper.waitForDlqProcessing(3);
+
+      const postDlqMetrics = dlqHelper.getDlqMetrics();
+      expect(postDlqMetrics.messagesStored).toBe(3);
+
+      // Start reprocessing
+      const reprocessResult = await dlqHelper.startReprocessingAndWait({
+        batchSize: 2,
+        timeoutMs: 8000,
+      });
+
+      expect(reprocessResult.reprocessingResults.messagesReprocessed).toBeGreaterThan(0);
+    }, 25000);
   });
 });

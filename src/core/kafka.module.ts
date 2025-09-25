@@ -1,11 +1,8 @@
 import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
-import { DiscoveryModule } from '@nestjs/core';
+import { DiscoveryModule, Reflector } from '@nestjs/core';
 import { Kafka } from 'kafkajs';
 
-import {
-  KAFKA_MODULE_OPTIONS,
-  KAFKAJS_INSTANCE,
-} from './kafka.constants';
+import { KAFKA_MODULE_OPTIONS, KAFKAJS_INSTANCE } from './kafka.constants';
 import {
   KafkaModuleAsyncOptions,
   KafkaModuleOptions,
@@ -15,6 +12,7 @@ import { KafkaProducerService } from './kafka.producer';
 import { RetryInterceptor } from '../interceptors/retry.interceptor';
 import { KafkaHandlerRegistry } from '../services/kafka.registry';
 import { KafkaRetryService } from '../services/kafka.retry.service';
+import { KafkaDlqService } from '../services/kafka.dlq.service';
 
 @Global()
 @Module({
@@ -43,10 +41,12 @@ export class KafkaModule {
       imports,
       providers,
       exports: [
+        // Core services
         KafkaProducerService,
         RetryInterceptor,
         KafkaHandlerRegistry,
         KafkaRetryService,
+        KafkaDlqService,
         KAFKA_MODULE_OPTIONS,
         KAFKAJS_INSTANCE,
       ],
@@ -122,8 +122,11 @@ export class KafkaModule {
           return new Kafka(options.client);
         },
       },
+      Reflector,
+      // Core services
       KafkaHandlerRegistry,
       KafkaRetryService,
+      KafkaDlqService,
       KafkaProducerService,
       RetryInterceptor,
     ];
@@ -155,6 +158,15 @@ export class KafkaModule {
       },
       dlq: {
         enabled: false,
+        topicPartitions: 3,
+        topicReplicationFactor: 1,
+        topicRetentionMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+        topicSegmentMs: 24 * 60 * 60 * 1000, // 24 hours
+        reprocessingOptions: {
+          batchSize: 100,
+          timeoutMs: 30000,
+          stopOnError: false,
+        },
       },
     };
 

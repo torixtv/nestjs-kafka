@@ -20,6 +20,7 @@ import {
 } from '../utils/retry.utils';
 import { KafkaProducerService } from '../core/kafka.producer';
 import { KafkaRetryService } from '../services/kafka.retry.service';
+import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaHandlerRegistry } from '../services/kafka.registry';
 
 @Injectable()
@@ -30,6 +31,7 @@ export class RetryInterceptor implements NestInterceptor {
     private readonly reflector: Reflector,
     private readonly producer: KafkaProducerService,
     private readonly retryService: KafkaRetryService,
+    private readonly dlqService: KafkaDlqService,
     private readonly handlerRegistry: KafkaHandlerRegistry,
   ) {}
 
@@ -50,9 +52,14 @@ export class RetryInterceptor implements NestInterceptor {
       return next.handle();
     }
 
+    this.logger.debug('RetryInterceptor activated for handler', {
+      pattern: handlerMetadata.pattern,
+      retryEnabled: handlerMetadata.options.retry.enabled,
+      dlqEnabled: handlerMetadata.options.dlq.enabled,
+    });
+
     return this.executeWithRetry(context, next, handlerMetadata);
   }
-
 
   private executeWithRetry(
     context: ExecutionContext,
@@ -90,7 +97,6 @@ export class RetryInterceptor implements NestInterceptor {
           maxRetries: retryOptions.attempts,
           error: error.message,
         });
-
 
         // Check if we should retry
         if (retryCount < retryOptions.attempts) {
@@ -135,12 +141,14 @@ export class RetryInterceptor implements NestInterceptor {
 
           // Handle DLQ if enabled
           if (dlqOptions?.enabled) {
-            await this.handleDLQ(message, error, dlqOptions, {
-              messageId,
+            await this.handleDLQ(
+              message,
+              error,
               topic,
-              partition,
+              handlerMetadata,
               retryCount,
-            });
+              correlationId,
+            );
           }
 
           // Don't re-throw - message is now dead lettered or discarded
@@ -229,64 +237,35 @@ export class RetryInterceptor implements NestInterceptor {
   private async handleDLQ(
     message: any,
     error: Error,
-    dlqOptions: any,
-    context: any,
+    originalTopic: string,
+    handlerMetadata: any,
+    retryCount: number,
+    correlationId?: string | null,
   ): Promise<void> {
     try {
-      const dlqTopic = dlqOptions.topic || this.buildDlqTopicName(context.topic);
+      const handlerId = this.createHandlerId(handlerMetadata);
 
-      const dlqMessage = {
-        key: message.key,
-        value: this.buildDlqPayload(message, error),
-        headers: {
-          ...message.headers,
-          'x-dlq-timestamp': new Date().toISOString(),
-          'x-dlq-reason': error.message,
-          'x-original-topic': context.topic,
-        },
-      };
+      await this.dlqService.storeToDlq(
+        message,
+        error,
+        originalTopic,
+        handlerId,
+        retryCount,
+        correlationId || undefined,
+      );
 
-      await this.producer.send(dlqTopic, dlqMessage);
-
-      this.logger.log('Message sent to DLQ', {
-        dlqTopic,
-        originalTopic: context.topic,
-        messageId: context.messageId,
+      this.logger.log('Message sent to centralized DLQ', {
+        dlqTopic: this.dlqService.getDlqTopicName(),
+        originalTopic,
+        handlerId,
         errorReason: error.message,
       });
     } catch (dlqError) {
-      this.logger.error('Failed to send message to DLQ', {
-        messageId: context.messageId,
+      this.logger.error('Failed to send message to centralized DLQ', {
+        originalTopic,
         originalError: error.message,
         dlqError: dlqError.message,
       });
     }
   }
-
-  private buildDlqTopicName(originalTopic: string): string {
-    return `dlq.${originalTopic}`;
-  }
-
-  private buildDlqPayload(message: any, error: Error): any {
-    return {
-      originalMessage: {
-        value: message.value,
-        headers: message.headers,
-        timestamp: message.timestamp,
-        offset: message.offset,
-        partition: message.partition,
-      },
-      error: {
-        message: error.message,
-        name: error.name,
-        stack: error.stack,
-        timestamp: new Date().toISOString(),
-      },
-      dlqMetadata: {
-        processedAt: new Date().toISOString(),
-        version: '1.0.0',
-      },
-    };
-  }
-
 }

@@ -23,9 +23,7 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
   private producer: Producer;
   private isConnected = false;
 
-  constructor(
-    @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
-  ) {
+  constructor(@Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka) {
     this.producer = this.kafka.producer();
   }
 
