@@ -1,29 +1,57 @@
-# @torix/kafka-events
+# @torix/nestjs-kafka
 
-A simplified, reusable NestJS Kafka events package with retry and DLQ support.
+[![npm version](https://badge.fury.io/js/%40torix%2Fnestjs-kafka.svg)](https://badge.fury.io/js/%40torix%2Fnestjs-kafka)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Build Status](https://github.com/torix/nestjs-kafka/workflows/CI/badge.svg)](https://github.com/torix/nestjs-kafka/actions)
+[![Coverage Status](https://coveralls.io/repos/github/torix/nestjs-kafka/badge.svg?branch=main)](https://coveralls.io/github/torix/nestjs-kafka?branch=main)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
+[![NestJS](https://img.shields.io/badge/NestJS-10.0+-red.svg)](https://nestjs.com/)
 
-## Features
+A **production-ready**, simplified NestJS Kafka events package with built-in retry mechanisms and Dead Letter Queue (DLQ) support. Designed for enterprise applications requiring reliable message processing with minimal configuration.
 
-- **Simple API**: Clean, intuitive decorators and services
-- **Retry Support**: Configurable retry with exponential/linear backoff
-- **DLQ Support**: Optional dead letter queue handling via plugins
-- **Plugin Architecture**: Extensible via plugins
-- **Production Ready**: Based on battle-tested implementations
-- **TypeScript**: Full TypeScript support with strict typing
+## ✨ Key Features
 
-## Installation
+- **🚀 Zero-Configuration Start** - Works out-of-the-box with sensible defaults
+- **🔄 Smart Retry Mechanism** - Exponential/linear backoff with timestamp-based delay processing
+- **💀 Dead Letter Queue** - Automatic DLQ storage and reprocessing capabilities
+- **📊 Production Monitoring** - Built-in metrics, health checks, and REST APIs
+- **🏗️ Enterprise Architecture** - Centralized bootstrap, handler registry, and message processing
+- **🛡️ Type Safety** - Full TypeScript support with strict typing
+- **🔧 Flexible Configuration** - Environment-based configuration with validation
+- **📈 Scalable Design** - Handles high-throughput scenarios with proper offset management
+
+## 📋 Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Usage Examples](#usage-examples)
+- [API Reference](#api-reference)
+- [Monitoring & Operations](#monitoring--operations)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Migration Guide](#migration-guide)
+- [Contributing](#contributing)
+
+## 📦 Installation
 
 ```bash
-npm install @torix/kafka-events kafkajs
+npm install @torix/nestjs-kafka kafkajs
 ```
 
-## Quick Start
+**Dependencies:**
+- `kafkajs`: The underlying Kafka client
+- `@nestjs/common`: NestJS core (peer dependency)
+- `@nestjs/microservices`: For microservice support (peer dependency)
 
-### 1. Import the Module
+## 🚀 Quick Start
+
+### 1. Basic Module Setup
 
 ```typescript
 import { Module } from '@nestjs/common';
-import { KafkaModule } from '@torix/kafka-events';
+import { KafkaModule } from '@torix/nestjs-kafka';
 
 @Module({
   imports: [
@@ -35,6 +63,16 @@ import { KafkaModule } from '@torix/kafka-events';
       consumer: {
         groupId: 'my-service-group',
       },
+      retry: {
+        enabled: true,
+        attempts: 3,
+        baseDelay: 2000,
+        maxDelay: 30000,
+        backoff: 'exponential',
+      },
+      dlq: {
+        enabled: true,
+      },
     }),
   ],
 })
@@ -45,10 +83,10 @@ export class AppModule {}
 
 ```typescript
 import { Injectable } from '@nestjs/common';
-import { EventHandler, KafkaController } from '@torix/kafka-events';
+import { EventHandler } from '@torix/nestjs-kafka';
 
 @Injectable()
-export class OrderController extends KafkaController {
+export class OrderService {
   @EventHandler('order.created', {
     retry: {
       enabled: true,
@@ -56,15 +94,18 @@ export class OrderController extends KafkaController {
       backoff: 'exponential',
     },
   })
-  async handleOrderCreated(payload: any) {
-    console.log('Order created:', payload);
-    // Process the order
+  async handleOrderCreated(payload: OrderCreatedEvent) {
+    console.log('Processing order:', payload);
+    // Your business logic here
+    if (payload.shouldFail) {
+      throw new Error('Simulated processing failure');
+    }
   }
 
   @EventHandler('user.registered')
-  async handleUserRegistered(payload: any) {
+  async handleUserRegistered(payload: UserRegisteredEvent) {
     console.log('User registered:', payload);
-    // Process the user registration
+    // This handler uses global retry configuration
   }
 }
 ```
@@ -73,115 +114,976 @@ export class OrderController extends KafkaController {
 
 ```typescript
 import { Injectable } from '@nestjs/common';
-import { KafkaProducerService } from '@torix/kafka-events';
+import { KafkaProducerService } from '@torix/nestjs-kafka';
 
 @Injectable()
-export class OrderService {
+export class OrderProducerService {
   constructor(private readonly producer: KafkaProducerService) {}
 
-  async createOrder(orderData: any) {
-    // Create order logic...
-
+  async publishOrderCreated(order: Order): Promise<void> {
     await this.producer.send('order.created', {
-      key: orderData.id,
-      value: orderData,
+      key: order.id,
+      value: order,
+      headers: {
+        'source': 'order-service',
+        'version': '1.0.0',
+      },
     });
   }
 }
 ```
 
-## Configuration
+## 🏗️ Architecture
 
-### Basic Configuration
+### System Architecture
+
+```mermaid
+graph TB
+    A[KafkaModule] --> B[KafkaBootstrapService]
+    A --> C[KafkaHandlerRegistry]
+    A --> D[KafkaProducerService]
+    A --> E[KafkaRetryService]
+    A --> F[KafkaDlqService]
+
+    B --> G[Initialization Coordinator]
+    C --> H[Handler Discovery]
+    C --> I[@EventHandler Decorators]
+
+    E --> J[Retry Topic Management]
+    E --> K[Retry Consumer]
+    E --> L[Exponential Backoff]
+
+    F --> M[DLQ Topic Management]
+    F --> N[Message Storage]
+    F --> O[Reprocessing API]
+
+    style A fill:#e1f5fe
+    style E fill:#f3e5f5
+    style F fill:#fff3e0
+```
+
+### Message Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant T as Topic
+    participant H as Handler
+    participant R as Retry Service
+    participant D as DLQ Service
+
+    P->>T: Send Message
+    T->>H: Consume Message
+
+    alt Success
+        H->>H: Process Successfully
+    else Failure (Retry Enabled)
+        H-->>R: Handle Failure
+        R->>R: Calculate Delay
+        R->>RT: Send to Retry Topic
+        RT->>R: Consume after delay
+        R->>H: Retry Processing
+
+        alt Max Retries Exceeded
+            R-->>D: Send to DLQ
+            D->>DT: Store in DLQ Topic
+        end
+    else Failure (No Retry)
+        H-->>D: Send to DLQ
+        D->>DT: Store in DLQ Topic
+    end
+
+    Note over D,DT: DLQ Reprocessing Available
+```
+
+### Bootstrap Sequence
+
+```mermaid
+sequenceDiagram
+    participant App as NestJS App
+    participant BS as BootstrapService
+    participant HR as HandlerRegistry
+    participant RM as RetryManager
+    participant RC as RetryConsumer
+
+    App->>BS: OnApplicationBootstrap
+    BS->>HR: Initialize Handler Registry
+    HR->>HR: Discover @EventHandler decorators
+    HR->>BS: Registry Ready
+    BS->>RM: Initialize Retry Manager
+    RM->>RM: Create/Validate Retry Topics
+    RM->>BS: Topics Ready
+    BS->>RC: Start Retry Consumer
+    RC->>RC: Begin Processing Retry Messages
+    RC->>BS: Consumer Ready
+    BS->>App: Bootstrap Complete
+```
+
+## ⚙️ Configuration
+
+### Configuration Interface
 
 ```typescript
-KafkaModule.forRoot({
+export interface KafkaModuleOptions {
   client: {
-    clientId: 'my-service',
-    brokers: ['localhost:9092'],
-  },
+    clientId: string;
+    brokers: string[];
+    ssl?: boolean;
+    sasl?: {
+      mechanism: 'plain' | 'scram-sha-256' | 'scram-sha-512';
+      username: string;
+      password: string;
+    };
+  };
   consumer: {
-    groupId: 'my-service-group',
-  },
-  retry: {
-    enabled: true,
-    attempts: 3,
-    backoff: 'exponential',
-    maxDelay: 30000,
-    baseDelay: 1000,
-  },
-  dlq: {
-    enabled: true,
-    topic: 'my-service.dlq',
-  },
-})
+    groupId: string;
+    sessionTimeout?: number;
+    heartbeatInterval?: number;
+  };
+  retry?: {
+    enabled: boolean;
+    attempts: number;
+    baseDelay: number;
+    maxDelay: number;
+    backoff: 'exponential' | 'linear';
+    topicPartitions?: number;
+    topicReplicationFactor?: number;
+    topicRetentionMs?: number;
+    topicSegmentMs?: number;
+  };
+  dlq?: {
+    enabled: boolean;
+    topicPartitions?: number;
+    topicReplicationFactor?: number;
+    topicRetentionMs?: number;
+  };
+  requireBroker?: boolean;
+}
 ```
 
-### Async Configuration
+### Environment-Based Configuration
 
 ```typescript
-KafkaModule.forRootAsync({
-  useFactory: async (configService: ConfigService) => ({
-    client: {
-      clientId: configService.get('KAFKA_CLIENT_ID'),
-      brokers: configService.get('KAFKA_BROKERS').split(','),
-    },
-    consumer: {
-      groupId: configService.get('KAFKA_CONSUMER_GROUP'),
-    },
-  }),
-  inject: [ConfigService],
-})
-```
+import { ConfigService } from '@nestjs/config';
 
-## Plugins
-
-### DLQ Plugin
-
-```typescript
-import { DLQPlugin } from '@torix/kafka-events';
-
-KafkaModule.forRoot({
-  // ... other config
-  plugins: [
-    new DLQPlugin({
-      topicPrefix: 'dlq',
-      includeErrorDetails: true,
-      includeOriginalMessage: true,
+@Module({
+  imports: [
+    KafkaModule.forRootAsync({
+      useFactory: async (configService: ConfigService) => ({
+        client: {
+          clientId: configService.get<string>('KAFKA_CLIENT_ID'),
+          brokers: configService.get<string>('KAFKA_BROKERS').split(','),
+          ssl: configService.get<boolean>('KAFKA_SSL_ENABLED', false),
+        },
+        consumer: {
+          groupId: configService.get<string>('KAFKA_CONSUMER_GROUP'),
+        },
+        retry: {
+          enabled: configService.get<boolean>('KAFKA_RETRY_ENABLED', true),
+          attempts: configService.get<number>('KAFKA_RETRY_ATTEMPTS', 3),
+          baseDelay: configService.get<number>('KAFKA_RETRY_BASE_DELAY', 2000),
+          maxDelay: configService.get<number>('KAFKA_RETRY_MAX_DELAY', 30000),
+          backoff: configService.get<'exponential' | 'linear'>('KAFKA_RETRY_BACKOFF', 'exponential'),
+        },
+        dlq: {
+          enabled: configService.get<boolean>('KAFKA_DLQ_ENABLED', true),
+        },
+        requireBroker: configService.get<boolean>('KAFKA_REQUIRE_BROKER', true),
+      }),
+      inject: [ConfigService],
     }),
   ],
 })
+export class AppModule {}
 ```
 
-## API Reference
+### Microservice Setup
+
+```typescript
+// main.ts
+import { NestFactory } from '@nestjs/core';
+import { Transport } from '@nestjs/microservices';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // Register Kafka microservice
+  app.connectMicroservice({
+    transport: Transport.KAFKA,
+    options: {
+      client: {
+        clientId: 'my-service',
+        brokers: ['localhost:9092'],
+      },
+      consumer: {
+        groupId: 'my-service-group',
+      },
+      subscribe: {
+        topics: ['order.created', 'user.registered'],
+        fromBeginning: false,
+      },
+    },
+  });
+
+  await app.startAllMicroservices();
+  await app.listen(3000);
+}
+bootstrap();
+```
+
+## 💡 Usage Examples
+
+### Handler with Custom Retry Configuration
+
+```typescript
+@Injectable()
+export class PaymentService {
+  @EventHandler('payment.process', {
+    retry: {
+      enabled: true,
+      attempts: 5,
+      baseDelay: 5000,
+      maxDelay: 60000,
+      backoff: 'exponential',
+    },
+  })
+  async processPayment(payload: PaymentEvent) {
+    try {
+      await this.externalPaymentGateway.charge(payload);
+    } catch (error) {
+      if (error.code === 'TEMPORARY_FAILURE') {
+        throw error; // Will retry
+      }
+      // Log and don't retry for permanent failures
+      this.logger.error('Permanent payment failure', error);
+      return; // Success (don't retry)
+    }
+  }
+}
+```
+
+### DLQ Message Reprocessing
+
+```typescript
+@Injectable()
+export class DlqManagementService {
+  constructor(private readonly dlqService: KafkaDlqService) {}
+
+  async reprocessFailedOrders(): Promise<void> {
+    // Reprocess all DLQ messages for order handlers
+    await this.dlqService.reprocessMessages({
+      handlerId: 'OrderService.handleOrderCreated',
+      batchSize: 50,
+      timeoutMs: 30000,
+      stopOnError: false,
+    });
+  }
+
+  async reprocessAllDlqMessages(): Promise<void> {
+    // Reprocess all messages in DLQ
+    await this.dlqService.reprocessMessages({
+      batchSize: 100,
+      timeoutMs: 60000,
+    });
+  }
+
+  async getDlqStatus(): Promise<any> {
+    return this.dlqService.getStatus();
+  }
+}
+```
+
+### Message Production with Headers
+
+```typescript
+@Injectable()
+export class NotificationService {
+  constructor(private readonly producer: KafkaProducerService) {}
+
+  async sendOrderConfirmation(order: Order): Promise<void> {
+    await this.producer.send('notification.send', {
+      key: order.customerId,
+      value: {
+        type: 'order_confirmation',
+        orderId: order.id,
+        customerEmail: order.customerEmail,
+        items: order.items,
+      },
+      headers: {
+        'correlation-id': order.correlationId,
+        'source-service': 'order-service',
+        'event-version': '2.0',
+        'timestamp': new Date().toISOString(),
+      },
+    });
+  }
+
+  async sendBatch(notifications: Notification[]): Promise<void> {
+    const messages = notifications.map(notification => ({
+      key: notification.userId,
+      value: notification,
+      headers: {
+        'batch-id': generateBatchId(),
+        'source-service': 'notification-service',
+      },
+    }));
+
+    await this.producer.sendBatch('notification.send', messages);
+  }
+}
+```
+
+### Error Handling Patterns
+
+```typescript
+@Injectable()
+export class OrderProcessingService {
+  private readonly logger = new Logger(OrderProcessingService.name);
+
+  @EventHandler('order.created')
+  async handleOrderCreated(payload: OrderEvent, context: any) {
+    const headers = context.getMessage().headers;
+    const retryCount = parseInt(headers['x-retry-count'] || '0', 10);
+
+    try {
+      await this.processOrder(payload);
+      this.logger.log(`Order processed successfully: ${payload.orderId}`);
+    } catch (error) {
+      this.logger.error(
+        `Order processing failed (attempt ${retryCount + 1}): ${payload.orderId}`,
+        error.stack,
+      );
+
+      if (this.isPermanentError(error)) {
+        this.logger.warn(`Permanent error detected for order: ${payload.orderId}`);
+        // Don't throw - this prevents retry
+        await this.handlePermanentFailure(payload, error);
+        return;
+      }
+
+      // Temporary error - will be retried
+      throw error;
+    }
+  }
+
+  private isPermanentError(error: Error): boolean {
+    return error.message.includes('INVALID_ORDER') ||
+           error.message.includes('CUSTOMER_NOT_FOUND');
+  }
+
+  private async handlePermanentFailure(payload: OrderEvent, error: Error): Promise<void> {
+    // Send to alternative processing or alerting
+    await this.alertingService.sendAlert({
+      type: 'PERMANENT_ORDER_FAILURE',
+      orderId: payload.orderId,
+      error: error.message,
+    });
+  }
+}
+```
+
+## 📚 API Reference
 
 ### Decorators
 
-- `@EventHandler(pattern, options?)` - Handle Kafka events with optional retry/DLQ
-- `@SimpleEventHandler(pattern)` - Handle events without retry/DLQ
+#### @EventHandler(pattern, options?)
+
+Marks a method as a Kafka event handler with optional retry and DLQ configuration.
+
+```typescript
+@EventHandler(pattern: string, options?: EventHandlerOptions)
+
+interface EventHandlerOptions {
+  retry?: {
+    enabled?: boolean;
+    attempts?: number;
+    baseDelay?: number;
+    maxDelay?: number;
+    backoff?: 'exponential' | 'linear';
+  };
+}
+```
+
+#### @SimpleEventHandler(pattern)
+
+Marks a method as a simple Kafka event handler without retry/DLQ support.
+
+```typescript
+@SimpleEventHandler(pattern: string)
+```
 
 ### Services
 
-- `KafkaProducerService` - Send messages to Kafka topics
-- `KafkaController` - Base class for event handlers
+#### KafkaProducerService
 
-### Utilities
+Service for sending messages to Kafka topics.
 
-- `calculateRetryDelay()` - Calculate retry delays
-- `getRetryCountFromHeaders()` - Extract retry count from message headers
-- `createMessageId()` - Create unique message identifiers
+```typescript
+class KafkaProducerService {
+  async send(topic: string, message: MessagePayload): Promise<RecordMetadata[]>
+  async sendBatch(topic: string, messages: MessagePayload[]): Promise<RecordMetadata[]>
+}
 
-## Migration from Complex Implementation
+interface MessagePayload {
+  key?: string;
+  value: any;
+  headers?: Record<string, string>;
+}
+```
 
-This package simplifies the previous complex implementation by:
+#### KafkaDlqService
 
-1. **Removing 4 overlapping retry mechanisms** → Single clean interceptor
-2. **Simplifying DLQ from complex processor** → Simple plugin-based publishing
-3. **Consolidating configuration** → Single, flat configuration object
-4. **Plugin architecture** → Optional features that can be added as needed
+Service for managing Dead Letter Queue operations.
 
-See `EXTRACTION_PLAN.md` for detailed migration information.
+```typescript
+class KafkaDlqService {
+  async getStatus(): Promise<DlqStatus>
+  async reprocessMessages(options?: DlqReprocessingOptions): Promise<void>
+  async stopReprocessing(): Promise<void>
+}
 
-## License
+interface DlqReprocessingOptions {
+  handlerId?: string;
+  batchSize?: number;
+  timeoutMs?: number;
+  stopOnError?: boolean;
+}
+```
 
-MIT
+#### KafkaRetryService
+
+Service for managing retry operations and metrics.
+
+```typescript
+class KafkaRetryService {
+  async getMetrics(): Promise<RetryMetrics>
+  async getRetryTopicInfo(): Promise<TopicInfo>
+}
+
+interface RetryMetrics {
+  messagesProcessed: number;
+  messagesDelayed: number;
+  messagesSkipped: number;
+  errorsEncountered: number;
+}
+```
+
+### Interfaces
+
+#### KafkaModuleOptions
+
+Complete configuration interface for the Kafka module.
+
+#### EventHandlerOptions
+
+Configuration options for individual event handlers.
+
+#### DlqMessageHeaders
+
+Headers included in DLQ messages for tracking and reprocessing.
+
+```typescript
+interface DlqMessageHeaders {
+  'x-original-topic': string;
+  'x-handler-id': string;
+  'x-retry-count': string;
+  'x-error-message': string;
+  'x-failed-at': string;
+  'x-dlq-stored-at': string;
+}
+```
+
+## 📊 Monitoring & Operations
+
+### REST API Endpoints
+
+When running the example application or implementing similar endpoints:
+
+```typescript
+// Health Check
+GET /health
+Response: { status: 'ok', kafka: 'connected', retry: 'running', dlq: 'ready' }
+
+// Metrics
+GET /metrics
+Response: {
+  retry: {
+    messagesProcessed: 1250,
+    messagesDelayed: 45,
+    messagesSkipped: 12,
+    errorsEncountered: 23
+  },
+  dlq: {
+    messagesStored: 15,
+    isReprocessing: false
+  }
+}
+
+// DLQ Status
+GET /dlq/status
+Response: {
+  dlq: {
+    topicName: 'my-service.dlq',
+    enabled: true,
+    isReprocessing: false,
+    topicExists: true
+  }
+}
+
+// DLQ Reprocessing
+POST /dlq/reprocess
+Body: {
+  "handlerId": "OrderService.handleOrderCreated",
+  "batchSize": 50,
+  "timeoutMs": 30000
+}
+```
+
+### Prometheus Integration
+
+```typescript
+import { PrometheusModule } from '@willsoto/nestjs-prometheus';
+import { Counter, Histogram } from 'prom-client';
+
+@Injectable()
+export class MetricsService {
+  private readonly messageProcessedCounter = new Counter({
+    name: 'kafka_messages_processed_total',
+    help: 'Total number of Kafka messages processed',
+    labelNames: ['topic', 'handler', 'status'],
+  });
+
+  private readonly messageProcessingDuration = new Histogram({
+    name: 'kafka_message_processing_duration_seconds',
+    help: 'Time spent processing Kafka messages',
+    labelNames: ['topic', 'handler'],
+  });
+
+  recordMessageProcessed(topic: string, handler: string, status: 'success' | 'failure'): void {
+    this.messageProcessedCounter.inc({ topic, handler, status });
+  }
+}
+```
+
+### Health Indicators
+
+```typescript
+import { HealthIndicator, HealthIndicatorResult } from '@nestjs/terminus';
+
+@Injectable()
+export class KafkaHealthIndicator extends HealthIndicator {
+  constructor(private readonly kafkaService: KafkaProducerService) {
+    super();
+  }
+
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    try {
+      await this.kafkaService.send('health-check', { timestamp: Date.now() });
+      return this.getStatus(key, true);
+    } catch (error) {
+      return this.getStatus(key, false, { error: error.message });
+    }
+  }
+}
+```
+
+## 🧪 Testing
+
+### Unit Testing
+
+```typescript
+import { Test, TestingModule } from '@nestjs/testing';
+import { KafkaProducerService } from '@torix/nestjs-kafka';
+import { OrderService } from './order.service';
+
+describe('OrderService', () => {
+  let service: OrderService;
+  let mockProducer: jest.Mocked<KafkaProducerService>;
+
+  beforeEach(async () => {
+    const mockProducerService = {
+      send: jest.fn(),
+      sendBatch: jest.fn(),
+    };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        OrderService,
+        {
+          provide: KafkaProducerService,
+          useValue: mockProducerService,
+        },
+      ],
+    }).compile();
+
+    service = module.get<OrderService>(OrderService);
+    mockProducer = module.get(KafkaProducerService);
+  });
+
+  it('should handle order created event', async () => {
+    const orderEvent = { orderId: '123', customerId: '456', amount: 100 };
+
+    await service.handleOrderCreated(orderEvent);
+
+    expect(mockProducer.send).toHaveBeenCalledWith(
+      'order.processed',
+      expect.objectContaining({
+        key: '123',
+        value: expect.objectContaining(orderEvent),
+      }),
+    );
+  });
+
+  it('should retry on failure', async () => {
+    const orderEvent = { orderId: '123', shouldFail: true };
+
+    await expect(service.handleOrderCreated(orderEvent)).rejects.toThrow();
+  });
+});
+```
+
+### Integration Testing
+
+```typescript
+// docker-compose.test.yml
+version: '3.8'
+services:
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+// integration.test.ts
+describe('Kafka Integration', () => {
+  let app: INestApplication;
+  let kafkaProducer: KafkaProducerService;
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [
+        KafkaModule.forRoot({
+          client: {
+            clientId: 'test-service',
+            brokers: ['localhost:9092'],
+          },
+          consumer: {
+            groupId: 'test-group',
+          },
+          retry: {
+            enabled: true,
+            attempts: 2,
+            baseDelay: 1000,
+          },
+        }),
+        TestModule,
+      ],
+    }).compile();
+
+    app = moduleFixture.createNestApplication();
+    kafkaProducer = app.get<KafkaProducerService>(KafkaProducerService);
+
+    await app.init();
+  });
+
+  it('should process messages end-to-end', async (done) => {
+    const testMessage = { id: 'test-123', data: 'integration test' };
+
+    await kafkaProducer.send('test.topic', {
+      key: testMessage.id,
+      value: testMessage,
+    });
+
+    // Assert message was processed
+    setTimeout(() => {
+      // Verify through your test assertions
+      done();
+    }, 2000);
+  });
+});
+```
+
+### E2E Testing
+
+```bash
+# Start test environment
+npm run test:docker:up
+
+# Run E2E tests
+npm run test:e2e
+
+# Cleanup
+npm run test:docker:down
+```
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+#### 1. Handler Not Found for Retry Message
+
+**Problem:** `Handler not found for retry message: HandlerName`
+
+**Cause:** Bootstrap service hasn't run or handler registry not initialized.
+
+**Solution:**
+```typescript
+// Ensure proper module initialization
+@Module({
+  imports: [KafkaModule.forRoot({...})],
+  providers: [YourService], // Service with @EventHandler decorators
+})
+
+// In tests, manually trigger bootstrap if needed
+const bootstrapService = app.get(KafkaBootstrapService);
+await bootstrapService.forceInitialization();
+```
+
+#### 2. Messages Not Being Retried
+
+**Problem:** Failed messages go directly to DLQ without retry attempts.
+
+**Solution:**
+```typescript
+// Check retry configuration
+@EventHandler('topic.name', {
+  retry: {
+    enabled: true, // Ensure this is set
+    attempts: 3,
+  },
+})
+
+// Verify global retry configuration
+KafkaModule.forRoot({
+  retry: {
+    enabled: true, // Global retry must be enabled
+    attempts: 3,
+  },
+})
+```
+
+#### 3. DLQ Reprocessing Shows 0 Messages Processed
+
+**Problem:** DLQ reprocessing completes but processes 0 messages.
+
+**Causes & Solutions:**
+- **Wrong handler ID**: Use exact handler ID from logs
+- **No messages for handler**: Check DLQ topic contents
+- **Consumer group offset**: Reset consumer group if needed
+
+```typescript
+// Check DLQ status first
+const status = await dlqService.getStatus();
+console.log('DLQ Status:', status);
+
+// Use correct handler ID (check application logs)
+await dlqService.reprocessMessages({
+  handlerId: 'AppController.handleOrderCreated', // Exact format
+});
+```
+
+#### 4. Kafka Connection Errors
+
+**Problem:** Connection timeouts or broker not available.
+
+**Solution:**
+```typescript
+// For development
+KafkaModule.forRoot({
+  requireBroker: false, // Don't fail if Kafka unavailable
+})
+
+// Check broker connectivity
+npm run kafka:topics # List topics to verify connection
+```
+
+### Debug Logging
+
+Enable detailed logging for troubleshooting:
+
+```typescript
+// Enable debug logging
+KafkaModule.forRoot({
+  // ... other config
+  consumer: {
+    groupId: 'my-service-group',
+    logLevel: logLevel.DEBUG, // Add this
+  },
+})
+
+// Environment variable
+KAFKA_LOG_LEVEL=debug npm run start:dev
+```
+
+### Performance Optimization
+
+#### Message Processing Optimization
+
+```typescript
+@EventHandler('high-volume.topic', {
+  retry: {
+    enabled: true,
+    attempts: 2, // Reduce retry attempts for high-volume
+    baseDelay: 1000, // Shorter delays
+    maxDelay: 5000,
+  },
+})
+async handleHighVolumeMessages(payload: any) {
+  // Use async processing for non-critical operations
+  setImmediate(() => this.asyncProcessing(payload));
+
+  // Return quickly for primary processing
+  return this.primaryProcessing(payload);
+}
+```
+
+#### Consumer Configuration Tuning
+
+```typescript
+KafkaModule.forRoot({
+  consumer: {
+    groupId: 'my-service-group',
+    sessionTimeout: 30000,
+    heartbeatInterval: 3000,
+    maxBytesPerPartition: 1048576, // 1MB
+    minBytes: 1,
+    maxBytes: 10485760, // 10MB
+    maxWaitTimeInMs: 5000,
+  },
+})
+```
+
+## 📈 Migration Guide
+
+### From Complex Kafka Implementation
+
+If you're migrating from a complex Kafka implementation, this package simplifies:
+
+| Complex Implementation | @torix/nestjs-kafka | Benefit |
+|----------------------|-------------------|---------|
+| Multiple retry mechanisms | Single `RetryInterceptor` | Simplified logic |
+| Complex DLQ processing | Plugin-based DLQ service | Clean separation |
+| Manual offset management | Automatic handling | Reduced complexity |
+| Custom topic management | Built-in topic creation | Zero configuration |
+| Multiple configuration files | Single configuration object | Centralized config |
+
+### Migration Steps
+
+1. **Install the package**:
+   ```bash
+   npm install @torix/nestjs-kafka
+   ```
+
+2. **Replace existing Kafka modules**:
+   ```typescript
+   // Before
+   import { ComplexKafkaModule } from './complex-kafka';
+
+   // After
+   import { KafkaModule } from '@torix/nestjs-kafka';
+   ```
+
+3. **Simplify handler registration**:
+   ```typescript
+   // Before
+   @MessagePattern('order.created')
+   @UseInterceptors(RetryInterceptor, DLQInterceptor, MetricsInterceptor)
+   async handleOrderCreated(payload: any) { }
+
+   // After
+   @EventHandler('order.created', { retry: { enabled: true } })
+   async handleOrderCreated(payload: any) { }
+   ```
+
+4. **Update configuration**:
+   ```typescript
+   // Consolidate multiple config objects into single KafkaModuleOptions
+   KafkaModule.forRoot({
+     client: { /* client config */ },
+     consumer: { /* consumer config */ },
+     retry: { /* retry config */ },
+     dlq: { /* dlq config */ },
+   })
+   ```
+
+5. **Test thoroughly**:
+   - Verify all handlers are discovered
+   - Test retry mechanisms
+   - Validate DLQ functionality
+   - Check monitoring endpoints
+
+### Feature Mapping
+
+| Old Feature | New Equivalent | Notes |
+|-------------|---------------|-------|
+| Custom retry logic | `retry.backoff` configuration | Exponential/linear options |
+| Manual DLQ handling | `KafkaDlqService` | Automatic storage & reprocessing |
+| Metrics collection | Built-in metrics | Via REST endpoints |
+| Health checks | Built-in health indicators | Kafka connectivity checks |
+| Topic management | Automatic topic creation | Zero configuration needed |
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/torix/nestjs-kafka.git
+cd nestjs-kafka
+
+# Install dependencies
+npm install
+
+# Start development environment
+npm run dev
+
+# Run tests
+npm test
+```
+
+### Running the Example
+
+```bash
+cd example
+
+# Start Kafka infrastructure
+npm run docker:up
+
+# Build and start example application
+npm run build
+npm run start:dev
+
+# Test the endpoints
+curl http://localhost:3001/health
+curl -X POST http://localhost:3001/test/send
+```
+
+## 📄 License
+
+MIT © [Torix](https://github.com/torix)
+
+---
+
+**Need help?**
+
+- 📖 [Documentation](https://docs.torix.com/nestjs-kafka)
+- 🐛 [Report Issues](https://github.com/torix/nestjs-kafka/issues)
+- 💬 [Discussions](https://github.com/torix/nestjs-kafka/discussions)
+- 📧 [Email Support](mailto:support@torix.com)
+
+---
+
+<div align="center">
+  <strong>Built with ❤️ for the NestJS community</strong>
+</div>

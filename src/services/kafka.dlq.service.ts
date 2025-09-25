@@ -157,8 +157,8 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
     const baseGroupId = this.options.consumer?.groupId || 'kafka-service';
     const { groupId: _, ...consumerOptions } = this.options.consumer || {};
 
-    // Create a unique consumer for this reprocessing session
-    const reprocessingGroupId = `${baseGroupId}.dlq.reprocessing.${Date.now()}`;
+    // Create a fixed consumer group for DLQ reprocessing to avoid proliferation
+    const reprocessingGroupId = `${baseGroupId}.dlq.reprocessing`;
     this.reprocessingConsumer = this.kafka.consumer({
       groupId: reprocessingGroupId,
       ...consumerOptions,
@@ -166,6 +166,8 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.reprocessingConsumer.connect();
+      // Subscribe with fromBeginning to reprocess all messages in DLQ
+      // This ensures we reprocess all failed messages when requested
       await this.reprocessingConsumer.subscribe({
         topic: this.dlqTopicName,
         fromBeginning: true,
@@ -180,7 +182,7 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
       let lastMessageTime = Date.now();
 
       await this.reprocessingConsumer.run({
-        autoCommit: false,
+        autoCommit: true,
         partitionsConsumedConcurrently: 1,
         eachMessage: async (payload) => {
           const { message, partition, topic } = payload;
@@ -189,7 +191,6 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
             const headers = this.extractHeaders(message);
             if (!headers) {
               this.logger.warn('Skipping message with invalid DLQ headers');
-              await this.commitOffset(payload);
               this.metrics.messagesSkipped++;
               return;
             }
@@ -199,7 +200,6 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
             );
 
             await this.reprocessMessage(payload, headers);
-            await this.commitOffset(payload);
 
             processedCount++;
             lastMessageTime = Date.now();
@@ -225,8 +225,7 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
               throw error;
             }
 
-            // Commit offset even on error to avoid infinite loop
-            await this.commitOffset(payload);
+            // With autoCommit, Kafka will handle offset management automatically
           }
         },
       });
@@ -289,48 +288,79 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async commitOffset(payload: EachMessagePayload): Promise<void> {
-    const { message, partition, topic } = payload;
-    if (this.reprocessingConsumer) {
-      await this.reprocessingConsumer.commitOffsets([
-        {
-          topic,
-          partition,
-          offset: (parseInt(message.offset) + 1).toString(),
-        },
-      ]);
-    }
-  }
 
   private async reprocessMessage(
     payload: EachMessagePayload,
     headers: DlqMessageHeaders,
   ): Promise<void> {
     const { message } = payload;
-    const { 'x-handler-id': handlerId } = headers;
+    const {
+      'x-handler-id': handlerId,
+      'x-original-topic': originalTopic,
+    } = headers;
 
     try {
-      const handler = this.handlerRegistry.getHandler(handlerId);
-      if (!handler) {
-        this.metrics.messagesSkipped++;
-        this.logger.error(`Handler not found for DLQ message: ${handlerId}`);
-        return;
-      }
-
       // Extract original message payload from DLQ message
       const dlqPayload = message.value
         ? JSON.parse(message.value.toString())
         : null;
-      const originalMessage = dlqPayload?.originalMessage?.value || dlqPayload;
+      const originalMessage = dlqPayload?.originalMessage || {};
 
-      await this.handlerRegistry.executeHandler(handlerId, originalMessage);
+      // Build retry topic name (same pattern as retry service)
+      const clientId = this.options.client?.clientId || 'kafka-service';
+      const retryTopicName = `${clientId}.retry`;
+
+      // Prepare headers for retry topic with reset retry count
+      const retryHeaders: Record<string, string> = {
+        'x-original-topic': originalTopic,
+        'x-handler-id': handlerId,
+        'x-retry-count': '0', // Reset retry count for fresh retry attempt
+        'x-process-after': Date.now().toString(), // Process immediately
+        'x-original-partition': headers['x-original-partition'] || '0',
+        'x-original-offset': headers['x-original-offset'] || '0',
+        'x-original-timestamp':
+          headers['x-original-timestamp'] || Date.now().toString(),
+      };
+
+      // Add correlation ID if present
+      if (headers['x-correlation-id']) {
+        retryHeaders['x-correlation-id'] = headers['x-correlation-id'];
+      }
+
+      // Copy any other non-DLQ headers from original message
+      if (originalMessage.headers) {
+        for (const [key, value] of Object.entries(originalMessage.headers)) {
+          if (
+            !key.startsWith('x-retry-') &&
+            !key.startsWith('x-original-') &&
+            !key.startsWith('x-handler-') &&
+            !key.startsWith('x-dlq-') &&
+            !key.startsWith('x-process-after')
+          ) {
+            retryHeaders[key] = value ? value.toString() : '';
+          }
+        }
+      }
+
+      // Send to retry topic for processing
+      const messageValue = originalMessage.value
+        ? JSON.parse(originalMessage.value.toString())
+        : null;
+
+      await this.producer.send(retryTopicName, {
+        key: originalMessage.key
+          ? originalMessage.key.toString()
+          : undefined,
+        value: messageValue,
+        headers: retryHeaders,
+      });
 
       this.logger.debug(
-        `DLQ reprocessing successful for handler: ${handlerId}`,
+        `DLQ message sent to retry topic for reprocessing - Handler: ${handlerId}, Topic: ${retryTopicName}`,
       );
     } catch (error) {
       this.logger.error(
-        `DLQ reprocessing failed for handler: ${handlerId}:`,
+        `Failed to send DLQ message to retry topic for handler: ${handlerId}:`,
         error,
       );
       throw error;

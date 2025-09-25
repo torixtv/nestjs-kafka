@@ -20,6 +20,7 @@ import {
 import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
 import { KafkaHandlerRegistry } from './kafka.registry';
 import { KafkaDlqService } from './kafka.dlq.service';
+import { KafkaProducerService } from '../core/kafka.producer';
 import { calculateRetryDelay } from '../utils/retry.utils';
 import { KafkaRetryOptions } from '../interfaces/kafka.interfaces';
 
@@ -79,15 +80,20 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     @Inject(KAFKA_MODULE_OPTIONS) private readonly options: KafkaModuleOptions,
     private readonly handlerRegistry: KafkaHandlerRegistry,
     private readonly dlqService: KafkaDlqService,
+    private readonly producer: KafkaProducerService,
   ) {
     this.admin = this.kafka.admin();
     this.retryTopicName = this.buildRetryTopicName();
 
     const baseGroupId = this.options.consumer?.groupId || 'kafka-service';
-    const { groupId: _, ...consumerOptions } = this.options.consumer || {};
+    const { groupId, ...consumerOptions } = this.options.consumer || {};
 
+    // Configure consumer with polling intervals for better retry handling
     this.consumer = this.kafka.consumer({
       groupId: `${baseGroupId}.retry`,
+      sessionTimeout: 30000, // 30 seconds
+      heartbeatInterval: 3000, // 3 seconds heartbeat
+      maxWaitTimeInMs: 2000, // Wait up to 2 seconds for new messages before returning
       ...consumerOptions,
     });
   }
@@ -175,23 +181,38 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
         fromBeginning: true,
       });
 
-      await this.consumer.run({
-        autoCommit: false,
-        eachMessage: async (payload) => {
-          const { message, partition, topic } = payload;
+      // Start the polling loop with controlled intervals
+      this.startPollingLoop();
 
+      this.isRunning = true;
+      this.logger.log(
+        `Retry consumer started for topic: ${this.retryTopicName}`,
+      );
+    } catch (error) {
+      this.logger.error('Failed to start retry consumer:', error);
+      throw error;
+    }
+  }
+
+  private async startPollingLoop(): Promise<void> {
+    const pollInterval = 5000; // Poll every 5 seconds
+    const batchTimeout = 2000; // Wait up to 2 seconds for messages in each poll
+
+    // Process messages in controlled batches
+    await this.consumer.run({
+      autoCommit: false,
+      partitionsConsumedConcurrently: 1, // Process one partition at a time for better control
+      eachBatch: async ({ batch, resolveOffset, heartbeat }) => {
+        this.logger.debug(`Processing batch of ${batch.messages.length} messages`);
+
+        for (const message of batch.messages) {
           try {
             const headers = this.extractHeaders(message);
             if (!headers) {
-              await this.consumer.commitOffsets([
-                {
-                  topic,
-                  partition,
-                  offset: (parseInt(message.offset) + 1).toString(),
-                },
-              ]);
+              this.logger.warn('Skipping retry message with invalid headers');
+              resolveOffset(message.offset);
               this.metrics.messagesSkipped++;
-              return;
+              continue;
             }
 
             const processAfter = Math.floor(
@@ -203,66 +224,47 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
               this.logger.log(
                 `Processing ready retry message - Handler: ${headers['x-handler-id']}, Retry: ${headers['x-retry-count']}`,
               );
-              await this.processReadyMessage(payload, headers);
 
-              await this.consumer.commitOffsets([
-                {
-                  topic,
-                  partition,
-                  offset: (parseInt(message.offset) + 1).toString(),
-                },
-              ]);
-
+              await this.processReadyMessage(message, batch.topic, batch.partition, headers);
+              resolveOffset(message.offset);
               this.metrics.messagesProcessed++;
             } else {
               const delayRemaining = processAfter - now;
               this.logger.debug(
-                `Message not ready, ${delayRemaining}ms remaining - will wait and process`,
+                `Message not ready, ${delayRemaining}ms remaining - requeuing for next poll`,
               );
+
+              // Requeue the message to retry topic with same headers
+              await this.producer.send(this.retryTopicName, {
+                key: message.key ? message.key.toString() : undefined,
+                value: message.value,
+                headers: headers as unknown as Record<string, string>,
+              });
+
+              // Resolve offset since we've handled it by requeuing
+              resolveOffset(message.offset);
               this.metrics.messagesDelayed++;
-
-              // Wait for the full delay, then process the message
-              await new Promise((resolve) => setTimeout(resolve, delayRemaining));
-
-              // Now process the message after the delay
-              this.logger.log(
-                `Delay elapsed, processing retry message - Handler: ${headers['x-handler-id']}, Retry: ${headers['x-retry-count']}`,
-              );
-              await this.processReadyMessage(payload, headers);
-
-              await this.consumer.commitOffsets([
-                {
-                  topic,
-                  partition,
-                  offset: (parseInt(message.offset) + 1).toString(),
-                },
-              ]);
-
-              this.metrics.messagesProcessed++;
+              // Continue processing other messages instead of breaking
             }
+
+            // Send heartbeat to keep the consumer alive during long processing
+            await heartbeat();
           } catch (error) {
             this.metrics.errorsEncountered++;
             this.logger.error('Error processing retry message:', error);
 
-            await this.consumer.commitOffsets([
-              {
-                topic,
-                partition,
-                offset: (parseInt(message.offset) + 1).toString(),
-              },
-            ]);
+            // Resolve offset even on error to avoid infinite retries of broken messages
+            resolveOffset(message.offset);
           }
-        },
-      });
+        }
 
-      this.isRunning = true;
-      this.logger.log(
-        `Retry consumer started for topic: ${this.retryTopicName}`,
-      );
-    } catch (error) {
-      this.logger.error('Failed to start retry consumer:', error);
-      throw error;
-    }
+        // Add controlled delay between poll cycles
+        if (this.isRunning) {
+          this.logger.debug(`Waiting ${pollInterval}ms before next poll cycle`);
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
+      },
+    });
   }
 
   private async stopRetryConsumer(): Promise<void> {
@@ -279,11 +281,13 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+
   private async processReadyMessage(
-    payload: EachMessagePayload,
+    message: any,
+    topic: string,
+    partition: number,
     headers: RetryMessageHeaders,
   ): Promise<void> {
-    const { message, partition } = payload;
     const { 'x-handler-id': handlerId, 'x-retry-count': retryCountStr } =
       headers;
 
@@ -521,7 +525,7 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
   private async scheduleAdditionalRetry(
     message: KafkaMessage,
     headers: RetryMessageHeaders,
-    error: Error,
+    _error: Error,
     nextRetryCount: number,
     options: any,
   ): Promise<void> {
