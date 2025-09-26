@@ -203,7 +203,9 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
       autoCommit: false,
       partitionsConsumedConcurrently: 1, // Process one partition at a time for better control
       eachBatch: async ({ batch, resolveOffset, heartbeat }) => {
-        this.logger.debug(`Processing batch of ${batch.messages.length} messages`);
+        this.logger.debug(
+          `Processing batch of ${batch.messages.length} messages`,
+        );
 
         for (const message of batch.messages) {
           try {
@@ -225,7 +227,12 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
                 `Processing ready retry message - Handler: ${headers['x-handler-id']}, Retry: ${headers['x-retry-count']}`,
               );
 
-              await this.processReadyMessage(message, batch.topic, batch.partition, headers);
+              await this.processReadyMessage(
+                message,
+                batch.topic,
+                batch.partition,
+                headers,
+              );
               resolveOffset(message.offset);
               this.metrics.messagesProcessed++;
             } else {
@@ -261,7 +268,7 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
         // Add controlled delay between poll cycles
         if (this.isRunning) {
           this.logger.debug(`Waiting ${pollInterval}ms before next poll cycle`);
-          await new Promise(resolve => setTimeout(resolve, pollInterval));
+          await new Promise((resolve) => setTimeout(resolve, pollInterval));
         }
       },
     });
@@ -280,7 +287,6 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
       this.logger.error('Error stopping retry consumer:', error);
     }
   }
-
 
   private async processReadyMessage(
     message: any,
@@ -340,35 +346,35 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
         if (currentRetryCount >= maxRetries) {
           // Max retries exceeded - send to DLQ if enabled
           if (handlerConfig.metadata.options?.dlq?.enabled) {
-          this.logger.log('Max retries exceeded, sending to DLQ', {
-            handlerId: handler.handlerId,
-            retryCount: currentRetryCount,
-            maxRetries,
-          });
-
-          try {
-            await this.dlqService.storeToDlq(
-              message,
-              error,
-              headers['x-original-topic'],
-              handler.handlerId,
-              currentRetryCount,
-              headers['x-correlation-id'],
-            );
-
-            this.logger.log('Message sent to centralized DLQ', {
-              dlqTopic: this.dlqService.getDlqTopicName(),
-              originalTopic: headers['x-original-topic'],
+            this.logger.log('Max retries exceeded, sending to DLQ', {
               handlerId: handler.handlerId,
-              errorReason: error.message,
+              retryCount: currentRetryCount,
+              maxRetries,
             });
-          } catch (dlqError) {
-            this.logger.error('Failed to send message to centralized DLQ', {
-              originalTopic: headers['x-original-topic'],
-              originalError: error.message,
-              dlqError: dlqError.message,
-            });
-          }
+
+            try {
+              await this.dlqService.storeToDlq(
+                message,
+                error,
+                headers['x-original-topic'],
+                handler.handlerId,
+                currentRetryCount,
+                headers['x-correlation-id'],
+              );
+
+              this.logger.log('Message sent to centralized DLQ', {
+                dlqTopic: this.dlqService.getDlqTopicName(),
+                originalTopic: headers['x-original-topic'],
+                handlerId: handler.handlerId,
+                errorReason: error.message,
+              });
+            } catch (dlqError) {
+              this.logger.error('Failed to send message to centralized DLQ', {
+                originalTopic: headers['x-original-topic'],
+                originalError: error.message,
+                dlqError: dlqError.message,
+              });
+            }
           } else {
             this.logger.warn('Max retries exceeded but DLQ not enabled', {
               handlerId: handler.handlerId,
@@ -386,7 +392,13 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
           });
 
           try {
-            await this.scheduleAdditionalRetry(message, headers, error, currentRetryCount + 1, handlerConfig.metadata.options);
+            await this.scheduleAdditionalRetry(
+              message,
+              headers,
+              error,
+              currentRetryCount + 1,
+              handlerConfig.metadata.options,
+            );
           } catch (scheduleError) {
             this.logger.error('Failed to schedule additional retry', {
               handlerId: handler.handlerId,
@@ -548,7 +560,10 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
       'x-process-after': processAfter.toString(),
       'x-original-partition': headers['x-original-partition'] || '0',
       'x-original-offset': headers['x-original-offset'] || message.offset,
-      'x-original-timestamp': headers['x-original-timestamp'] || message.timestamp || Date.now().toString(),
+      'x-original-timestamp':
+        headers['x-original-timestamp'] ||
+        message.timestamp ||
+        Date.now().toString(),
     };
 
     if (headers['x-correlation-id']) {
@@ -558,7 +573,11 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     // Copy original headers (excluding retry headers)
     if (message.headers) {
       for (const [key, value] of Object.entries(message.headers)) {
-        if (!key.startsWith('x-retry-') && !key.startsWith('x-original-') && !key.startsWith('x-dlq-')) {
+        if (
+          !key.startsWith('x-retry-') &&
+          !key.startsWith('x-original-') &&
+          !key.startsWith('x-dlq-')
+        ) {
           retryHeaders[key] = value ? value.toString() : '';
         }
       }
@@ -571,11 +590,13 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     try {
       await producer.send({
         topic: this.retryTopicName,
-        messages: [{
-          key: message.key,
-          value: message.value,
-          headers: retryHeaders,
-        }],
+        messages: [
+          {
+            key: message.key,
+            value: message.value,
+            headers: retryHeaders,
+          },
+        ],
       });
 
       this.logger.log('Additional retry scheduled successfully', {
@@ -663,7 +684,9 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
   /**
    * Get retry configuration with defaults merged from module options
    */
-  getRetryConfiguration(overrides?: Partial<KafkaRetryOptions>): RetryConfiguration {
+  getRetryConfiguration(
+    overrides?: Partial<KafkaRetryOptions>,
+  ): RetryConfiguration {
     const defaults = this.options.retry || {};
     const merged = { ...defaults, ...overrides };
 
@@ -708,7 +731,9 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
 
     const processAfterTime = parseInt(String(processAfter), 10);
     if (isNaN(processAfterTime)) {
-      this.logger.warn('Invalid x-process-after header, processing immediately');
+      this.logger.warn(
+        'Invalid x-process-after header, processing immediately',
+      );
       return true;
     }
 
@@ -743,7 +768,10 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
   /**
    * Validate retry configuration
    */
-  validateRetryConfig(config: KafkaRetryOptions): { valid: boolean; errors: string[] } {
+  validateRetryConfig(config: KafkaRetryOptions): {
+    valid: boolean;
+    errors: string[];
+  } {
     const errors: string[] = [];
 
     if (config.enabled && config.attempts && config.attempts < 1) {
@@ -758,7 +786,11 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
       errors.push('Max delay must be >= 0');
     }
 
-    if (config.baseDelay && config.maxDelay && config.baseDelay > config.maxDelay) {
+    if (
+      config.baseDelay &&
+      config.maxDelay &&
+      config.baseDelay > config.maxDelay
+    ) {
       errors.push('Base delay cannot be greater than max delay');
     }
 

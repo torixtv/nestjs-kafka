@@ -8,6 +8,13 @@ import {
 import { Kafka, Producer, ProducerRecord, Message } from 'kafkajs';
 
 import { KAFKAJS_INSTANCE } from './kafka.constants';
+import {
+  createProducerSpan,
+  injectContextIntoHeaders,
+  executeWithSpan,
+  getCorrelationId,
+  isTracingEnabled,
+} from '../utils/tracing.utils';
 
 export interface MessagePayload {
   key?: string;
@@ -64,7 +71,16 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async send(topic: string, message: MessagePayload): Promise<void> {
-    await this.sendBatch(topic, [message]);
+    if (!isTracingEnabled()) {
+      await this.sendBatch(topic, [message]);
+      return;
+    }
+
+    const span = createProducerSpan(topic, message.key, message.partition);
+
+    await executeWithSpan(span, async () => {
+      await this.sendBatch(topic, [message]);
+    });
   }
 
   async sendBatch(topic: string, messages: MessagePayload[]): Promise<void> {
@@ -72,13 +88,32 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
       await this.connect();
     }
 
-    const kafkaMessages: Message[] = messages.map((msg) => ({
-      key: msg.key,
-      value: this.serializeValue(msg.value),
-      headers: msg.headers,
-      partition: msg.partition,
-      timestamp: msg.timestamp,
-    }));
+    const kafkaMessages: Message[] = messages.map((msg) => {
+      let enhancedHeaders = { ...msg.headers };
+
+      // Inject OpenTelemetry context into headers
+      if (isTracingEnabled()) {
+        enhancedHeaders = injectContextIntoHeaders(enhancedHeaders);
+      }
+
+      // Auto-inject correlation-id from current context if not already present
+      const correlationId = getCorrelationId(msg.headers);
+      if (
+        correlationId &&
+        !enhancedHeaders['x-correlation-id'] &&
+        !enhancedHeaders['correlationId']
+      ) {
+        enhancedHeaders['x-correlation-id'] = correlationId;
+      }
+
+      return {
+        key: msg.key,
+        value: this.serializeValue(msg.value),
+        headers: enhancedHeaders,
+        partition: msg.partition,
+        timestamp: msg.timestamp,
+      };
+    });
 
     const record: ProducerRecord = {
       topic,
@@ -121,13 +156,32 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
 
     try {
       for (const record of records) {
-        const kafkaMessages: Message[] = record.messages.map((msg) => ({
-          key: msg.key,
-          value: this.serializeValue(msg.value),
-          headers: msg.headers,
-          partition: msg.partition,
-          timestamp: msg.timestamp,
-        }));
+        const kafkaMessages: Message[] = record.messages.map((msg) => {
+          let enhancedHeaders = { ...msg.headers };
+
+          // Inject OpenTelemetry context into headers
+          if (isTracingEnabled()) {
+            enhancedHeaders = injectContextIntoHeaders(enhancedHeaders);
+          }
+
+          // Auto-inject correlation-id from current context if not already present
+          const correlationId = getCorrelationId(msg.headers);
+          if (
+            correlationId &&
+            !enhancedHeaders['x-correlation-id'] &&
+            !enhancedHeaders['correlationId']
+          ) {
+            enhancedHeaders['x-correlation-id'] = correlationId;
+          }
+
+          return {
+            key: msg.key,
+            value: this.serializeValue(msg.value),
+            headers: enhancedHeaders,
+            partition: msg.partition,
+            timestamp: msg.timestamp,
+          };
+        });
 
         await transaction.send({
           topic: record.topic,

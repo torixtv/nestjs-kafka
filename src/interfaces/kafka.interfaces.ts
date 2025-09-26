@@ -43,7 +43,7 @@ export interface KafkaModuleOptions {
   retry?: KafkaRetryOptions;
   dlq?: KafkaDlqOptions;
   requireBroker?: boolean;
-  serviceName?: string;  // Service name for consumer group generation
+  serviceName?: string; // Service name for consumer group generation
 }
 
 export interface KafkaModuleOptionsFactory {

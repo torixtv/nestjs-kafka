@@ -18,6 +18,14 @@ import {
   getCorrelationIdFromHeaders,
   createMessageId,
 } from '../utils/retry.utils';
+import {
+  createConsumerSpan,
+  createRetrySpan,
+  executeWithSpan,
+  executeWithSpanSync,
+  executeWithExtractedContext,
+  isTracingEnabled,
+} from '../utils/tracing.utils';
 import { KafkaProducerService } from '../core/kafka.producer';
 import { KafkaRetryService } from '../services/kafka.retry.service';
 import { KafkaDlqService } from '../services/kafka.dlq.service';
@@ -75,7 +83,7 @@ export class RetryInterceptor implements NestInterceptor {
     const dlqOptions = handlerMetadata.options.dlq;
 
     const retryCount = getRetryCountFromHeaders(message.headers);
-    const correlationId = getCorrelationIdFromHeaders(message.headers);
+    const correlationId = getCorrelationIdFromHeaders(message.headers) || null;
     const messageId = createMessageId(message, partition);
 
     this.logger.debug('Processing message with retry interceptor', {
@@ -88,36 +96,106 @@ export class RetryInterceptor implements NestInterceptor {
       correlationId,
     });
 
-    return next.handle().pipe(
-      catchError(async (error) => {
-        this.logger.warn('Message processing failed', {
-          messageId,
-          topic,
-          retryCount,
-          maxRetries: retryOptions.attempts,
-          error: error.message,
-        });
-
-        // Check if we should retry
-        if (retryCount < retryOptions.attempts) {
-          // Calculate delay for next retry
-          const delay = calculateRetryDelay({
-            attempt: retryCount + 1,
-            baseDelay: retryOptions.baseDelay,
-            maxDelay: retryOptions.maxDelay,
-            backoff: retryOptions.backoff,
-            jitter: true,
-          });
-
-          this.logger.log('Scheduling retry', {
-            messageId,
+    // Create consumer span and extract context for message processing
+    if (!isTracingEnabled()) {
+      return next.handle().pipe(
+        catchError(async (error) => {
+          return this.handleError(
+            error,
+            message,
             topic,
-            retryCount: retryCount + 1,
-            maxRetries: retryOptions.attempts,
-            delayMs: delay,
-          });
+            partition,
+            handlerMetadata,
+            retryOptions,
+            dlqOptions,
+            correlationId,
+            messageId,
+          );
+        }),
+      );
+    }
 
-          // Publish to retry topic with proper headers
+    // Execute with extracted context from message headers and create consumer span
+    const handlerId = this.createHandlerId(handlerMetadata);
+    const consumerSpan = createConsumerSpan(
+      topic,
+      handlerId,
+      message,
+      partition,
+    );
+
+    return executeWithExtractedContext(message.headers || {}, () => {
+      return executeWithSpanSync(consumerSpan, () => {
+        return next.handle().pipe(
+          catchError(async (error) => {
+            return this.handleError(
+              error,
+              message,
+              topic,
+              partition,
+              handlerMetadata,
+              retryOptions,
+              dlqOptions,
+              correlationId,
+              messageId,
+            );
+          }),
+        );
+      });
+    });
+  }
+
+  private async handleError(
+    error: Error,
+    message: any,
+    topic: string,
+    partition: number,
+    handlerMetadata: any,
+    retryOptions: any,
+    dlqOptions: any,
+    correlationId: string | null,
+    messageId: string,
+  ): Promise<any> {
+    const retryCount = getRetryCountFromHeaders(message.headers);
+
+    this.logger.warn('Message processing failed', {
+      messageId,
+      topic,
+      retryCount,
+      maxRetries: retryOptions.attempts,
+      error: error.message,
+    });
+
+    // Check if we should retry
+    if (retryCount < retryOptions.attempts) {
+      // Calculate delay for next retry
+      const delay = calculateRetryDelay({
+        attempt: retryCount + 1,
+        baseDelay: retryOptions.baseDelay,
+        maxDelay: retryOptions.maxDelay,
+        backoff: retryOptions.backoff,
+        jitter: true,
+      });
+
+      this.logger.log('Scheduling retry', {
+        messageId,
+        topic,
+        retryCount: retryCount + 1,
+        maxRetries: retryOptions.attempts,
+        delayMs: delay,
+      });
+
+      // Create retry span if tracing is enabled
+      if (isTracingEnabled()) {
+        const handlerId = this.createHandlerId(handlerMetadata);
+        const retrySpan = createRetrySpan(
+          topic,
+          handlerId,
+          retryCount + 1,
+          delay,
+        );
+
+        await executeWithSpan(retrySpan, async () => {
           await this.publishToRetryTopic(
             message,
             topic,
@@ -127,35 +205,45 @@ export class RetryInterceptor implements NestInterceptor {
             correlationId || null,
             handlerMetadata,
           );
+        });
+      } else {
+        await this.publishToRetryTopic(
+          message,
+          topic,
+          partition,
+          retryCount + 1,
+          delay,
+          correlationId || null,
+          handlerMetadata,
+        );
+      }
 
-          // Don't re-throw - we've handled the retry by publishing to retry topic
-          return;
-        } else {
-          // Max retries exceeded
-          this.logger.error('Max retries exceeded, processing DLQ', {
-            messageId,
-            topic,
-            retryCount,
-            maxRetries: retryOptions.attempts,
-          });
+      // Don't re-throw - we've handled the retry by publishing to retry topic
+      return;
+    } else {
+      // Max retries exceeded
+      this.logger.error('Max retries exceeded, processing DLQ', {
+        messageId,
+        topic,
+        retryCount,
+        maxRetries: retryOptions.attempts,
+      });
 
-          // Handle DLQ if enabled
-          if (dlqOptions?.enabled) {
-            await this.handleDLQ(
-              message,
-              error,
-              topic,
-              handlerMetadata,
-              retryCount,
-              correlationId,
-            );
-          }
+      // Handle DLQ if enabled
+      if (dlqOptions?.enabled) {
+        await this.handleDLQ(
+          message,
+          error,
+          topic,
+          handlerMetadata,
+          retryCount,
+          correlationId,
+        );
+      }
 
-          // Don't re-throw - message is now dead lettered or discarded
-          return;
-        }
-      }),
-    );
+      // Don't re-throw - message is now dead lettered or discarded
+      return;
+    }
   }
 
   private async publishToRetryTopic(

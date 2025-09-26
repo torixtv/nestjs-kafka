@@ -20,6 +20,11 @@ import {
 import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
 import { KafkaHandlerRegistry } from './kafka.registry';
 import { KafkaProducerService } from '../core/kafka.producer';
+import {
+  createDlqSpan,
+  executeWithSpan,
+  isTracingEnabled,
+} from '../utils/tracing.utils';
 
 export interface DlqMessageHeaders {
   'x-original-topic': string;
@@ -288,7 +293,6 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-
   private async reprocessMessage(
     payload: EachMessagePayload,
     headers: DlqMessageHeaders,
@@ -297,7 +301,34 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
     const {
       'x-handler-id': handlerId,
       'x-original-topic': originalTopic,
+      'x-retry-count': retryCountStr,
     } = headers;
+
+    // Create DLQ reprocess span if tracing is enabled
+    if (isTracingEnabled()) {
+      const retryCount = parseInt(retryCountStr || '0', 10);
+      const dlqSpan = createDlqSpan(
+        originalTopic,
+        handlerId,
+        retryCount,
+        'reprocess',
+      );
+
+      await executeWithSpan(dlqSpan, async () => {
+        await this.reprocessMessageInternal(payload, headers);
+      });
+    } else {
+      await this.reprocessMessageInternal(payload, headers);
+    }
+  }
+
+  private async reprocessMessageInternal(
+    payload: EachMessagePayload,
+    headers: DlqMessageHeaders,
+  ): Promise<void> {
+    const { message } = payload;
+    const { 'x-handler-id': handlerId, 'x-original-topic': originalTopic } =
+      headers;
 
     try {
       // Extract original message payload from DLQ message
@@ -348,9 +379,7 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
         : null;
 
       await this.producer.send(retryTopicName, {
-        key: originalMessage.key
-          ? originalMessage.key.toString()
-          : undefined,
+        key: originalMessage.key ? originalMessage.key.toString() : undefined,
         value: messageValue,
         headers: retryHeaders,
       });
@@ -380,6 +409,45 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Create DLQ span if tracing is enabled
+    if (isTracingEnabled()) {
+      const dlqSpan = createDlqSpan(
+        originalTopic,
+        handlerId,
+        retryCount,
+        'store',
+      );
+
+      await executeWithSpan(dlqSpan, async () => {
+        await this.storeToDlqInternal(
+          message,
+          error,
+          originalTopic,
+          handlerId,
+          retryCount,
+          correlationId,
+        );
+      });
+    } else {
+      await this.storeToDlqInternal(
+        message,
+        error,
+        originalTopic,
+        handlerId,
+        retryCount,
+        correlationId,
+      );
+    }
+  }
+
+  private async storeToDlqInternal(
+    message: any,
+    error: Error,
+    originalTopic: string,
+    handlerId: string,
+    retryCount: number,
+    correlationId?: string,
+  ): Promise<void> {
     try {
       const dlqHeaders: Record<string, string> = {
         'x-original-topic': originalTopic,
