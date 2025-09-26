@@ -117,9 +117,8 @@ jobs:
 
       - name: Verify package contents
         run: |
+          echo "Package verification:"
           npm pack --dry-run
-          echo "Package contents:"
-          tar -tzf "$(npm pack --dry-run --silent | tail -1)" | head -20
 
       - name: Publish to NPM (dry run)
         if: github.event.inputs.dry_run == 'true'
