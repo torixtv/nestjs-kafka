@@ -63,7 +63,7 @@ describe('EventHandler Decorator', () => {
     it('should set metadata for basic event handler', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleBasicEvent
+        controller.handleBasicEvent,
       );
 
       expect(metadata).toBeDefined();
@@ -75,7 +75,7 @@ describe('EventHandler Decorator', () => {
     it('should set metadata with retry configuration', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleRetryEvent
+        controller.handleRetryEvent,
       );
 
       expect(metadata).toBeDefined();
@@ -92,7 +92,7 @@ describe('EventHandler Decorator', () => {
     it('should set metadata with DLQ configuration', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleDlqEvent
+        controller.handleDlqEvent,
       );
 
       expect(metadata).toBeDefined();
@@ -106,7 +106,7 @@ describe('EventHandler Decorator', () => {
     it('should set metadata with full configuration', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleFullConfigEvent
+        controller.handleFullConfigEvent,
       );
 
       expect(metadata).toBeDefined();
@@ -127,7 +127,7 @@ describe('EventHandler Decorator', () => {
     it('should apply default retry configuration when not specified', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleBasicEvent
+        controller.handleBasicEvent,
       );
 
       expect(metadata.options.retry).toEqual({
@@ -142,7 +142,7 @@ describe('EventHandler Decorator', () => {
     it('should apply default DLQ configuration when not specified', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleBasicEvent
+        controller.handleBasicEvent,
       );
 
       expect(metadata.options.dlq).toEqual({
@@ -167,7 +167,7 @@ describe('EventHandler Decorator', () => {
       const partialController = new PartialRetryController();
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        partialController.handlePartialRetry
+        partialController.handlePartialRetry,
       );
 
       expect(metadata.options.retry).toEqual({
@@ -184,7 +184,7 @@ describe('EventHandler Decorator', () => {
     it('should set metadata with retry and DLQ disabled', () => {
       const metadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        controller.handleSimpleEvent
+        controller.handleSimpleEvent,
       );
 
       expect(metadata).toBeDefined();
@@ -210,19 +210,19 @@ describe('EventHandler Decorator', () => {
 
       const defaultMetadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        comparisonController.handleWithDefaults
+        comparisonController.handleWithDefaults,
       );
 
       const simpleMetadata = Reflect.getMetadata(
         EVENT_HANDLER_METADATA,
-        comparisonController.handleSimple
+        comparisonController.handleSimple,
       );
 
       expect(simpleMetadata.options.retry.enabled).toBe(
-        defaultMetadata.options.retry.enabled
+        defaultMetadata.options.retry.enabled,
       );
       expect(simpleMetadata.options.dlq.enabled).toBe(
-        defaultMetadata.options.dlq.enabled
+        defaultMetadata.options.dlq.enabled,
       );
     });
   });
@@ -242,9 +242,18 @@ describe('EventHandler Decorator', () => {
 
       const controller = new MultipleHandlersController();
 
-      const metadata1 = Reflect.getMetadata(EVENT_HANDLER_METADATA, controller.handler1);
-      const metadata2 = Reflect.getMetadata(EVENT_HANDLER_METADATA, controller.handler2);
-      const metadata3 = Reflect.getMetadata(EVENT_HANDLER_METADATA, controller.handler3);
+      const metadata1 = Reflect.getMetadata(
+        EVENT_HANDLER_METADATA,
+        controller.handler1,
+      );
+      const metadata2 = Reflect.getMetadata(
+        EVENT_HANDLER_METADATA,
+        controller.handler2,
+      );
+      const metadata3 = Reflect.getMetadata(
+        EVENT_HANDLER_METADATA,
+        controller.handler3,
+      );
 
       expect(metadata1.pattern).toBe('topic.1');
       expect(metadata2.pattern).toBe('topic.2');
@@ -264,7 +273,10 @@ describe('EventHandler Decorator', () => {
       }
 
       const controller = new EmptyOptionsController();
-      const metadata = Reflect.getMetadata(EVENT_HANDLER_METADATA, controller.handleEmpty);
+      const metadata = Reflect.getMetadata(
+        EVENT_HANDLER_METADATA,
+        controller.handleEmpty,
+      );
 
       expect(metadata).toBeDefined();
       expect(metadata.options.retry.enabled).toBe(false);
@@ -284,7 +296,10 @@ describe('EventHandler Decorator', () => {
       }
 
       const controller = new NullConfigController();
-      const metadata = Reflect.getMetadata(EVENT_HANDLER_METADATA, controller.handleNull);
+      const metadata = Reflect.getMetadata(
+        EVENT_HANDLER_METADATA,
+        controller.handleNull,
+      );
 
       expect(metadata.options.retry.enabled).toBe(true);
       expect(metadata.options.retry.attempts).toBeNull();

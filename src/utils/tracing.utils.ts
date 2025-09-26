@@ -1,9 +1,4 @@
-import {
-  trace,
-  SpanKind,
-  SpanStatusCode,
-  Span,
-} from '@opentelemetry/api';
+import { trace, SpanKind, SpanStatusCode, Span } from '@opentelemetry/api';
 import { randomBytes } from 'crypto';
 
 const TRACER_NAME = '@torix/nestjs-kafka';

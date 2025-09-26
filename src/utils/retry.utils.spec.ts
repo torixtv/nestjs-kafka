@@ -68,14 +68,18 @@ describe('RetryUtils', () => {
       };
 
       // Run multiple times to test jitter variance
-      const delays = Array.from({ length: 10 }, () => calculateRetryDelay(options));
+      const delays = Array.from({ length: 10 }, () =>
+        calculateRetryDelay(options),
+      );
 
       // All delays should be positive
-      delays.forEach(delay => expect(delay).toBeGreaterThanOrEqual(0));
+      delays.forEach((delay) => expect(delay).toBeGreaterThanOrEqual(0));
 
       // Should have some variance (not all the same due to jitter)
       const baseDelay = calculateRetryDelay({ ...options, jitter: false });
-      const hasVariance = delays.some(delay => Math.abs(delay - baseDelay) > 0);
+      const hasVariance = delays.some(
+        (delay) => Math.abs(delay - baseDelay) > 0,
+      );
       expect(hasVariance).toBe(true);
     });
 

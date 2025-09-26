@@ -49,7 +49,8 @@ describe('KafkaModule', () => {
         imports: [KafkaModule.forRoot(options)],
       }).compile();
 
-      const moduleOptions = testModule.get<KafkaModuleOptions>(KAFKA_MODULE_OPTIONS);
+      const moduleOptions =
+        testModule.get<KafkaModuleOptions>(KAFKA_MODULE_OPTIONS);
 
       expect(moduleOptions.client?.clientId).toBe('custom-client');
       expect(moduleOptions.client?.brokers).toEqual(['custom:9092']);
@@ -197,7 +198,6 @@ describe('KafkaModule', () => {
 
       await module.close();
     });
-
 
     it('should merge retry configuration', async () => {
       const module = await Test.createTestingModule({
