@@ -14,7 +14,7 @@ module.exports = {
   coverageDirectory: './coverage',
   testEnvironment: 'node',
   testTimeout: 10000,
-  moduleNameMapping: {
+  moduleNameMapper: {
     '^@torix/nestjs-kafka/(.*)$': '<rootDir>/src/$1',
   },
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],

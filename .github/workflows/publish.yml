@@ -47,6 +47,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install peer dependencies for testing
+        run: |
+          npm install --no-save @nestjs/common@^11.0.0 @nestjs/core@^11.0.0 @nestjs/microservices@^11.0.0 @opentelemetry/api@^1.0.0 reflect-metadata@^0.2.0 rxjs@^7.0.0
+
       - name: Run linter
         run: npm run lint
 
@@ -83,6 +87,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Install peer dependencies for building
+        run: |
+          npm install --no-save @nestjs/common@^11.0.0 @nestjs/core@^11.0.0 @nestjs/microservices@^11.0.0 @opentelemetry/api@^1.0.0 reflect-metadata@^0.2.0 rxjs@^7.0.0
 
       - name: Build package
         run: npm run build
