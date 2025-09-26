@@ -44,14 +44,10 @@ export type { MessagePayload } from './core/kafka.producer';
 
 // Tracing utilities (optional - only works if @opentelemetry/api is available)
 export {
-  isTracingEnabled,
-  createProducerSpan,
-  createConsumerSpan,
   createRetrySpan,
   createDlqSpan,
-  extractContextFromHeaders,
-  injectContextIntoHeaders,
   executeWithSpan,
-  executeWithSpanSync,
-  executeWithExtractedContext,
+  getCorrelationId,
+  getOrGenerateCorrelationId,
+  setSpanError,
 } from './utils/tracing.utils';

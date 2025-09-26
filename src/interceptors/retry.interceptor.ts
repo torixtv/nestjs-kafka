@@ -4,9 +4,8 @@ import {
   ExecutionContext,
   CallHandler,
   Logger,
-  Inject,
 } from '@nestjs/common';
-import { Observable, throwError } from 'rxjs';
+import { Observable } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { Reflector } from '@nestjs/core';
 import { KafkaContext } from '@nestjs/microservices';
@@ -18,14 +17,7 @@ import {
   getCorrelationIdFromHeaders,
   createMessageId,
 } from '../utils/retry.utils';
-import {
-  createConsumerSpan,
-  createRetrySpan,
-  executeWithSpan,
-  executeWithSpanSync,
-  executeWithExtractedContext,
-  isTracingEnabled,
-} from '../utils/tracing.utils';
+import { createRetrySpan, executeWithSpan } from '../utils/tracing.utils';
 import { KafkaProducerService } from '../core/kafka.producer';
 import { KafkaRetryService } from '../services/kafka.retry.service';
 import { KafkaDlqService } from '../services/kafka.dlq.service';
@@ -50,7 +42,6 @@ export class RetryInterceptor implements NestInterceptor {
     }
 
     const handler = context.getHandler();
-    const target = context.getClass();
 
     // Get retry options from metadata
     const handlerMetadata = this.reflector.get(EVENT_HANDLER_METADATA, handler);
@@ -96,53 +87,22 @@ export class RetryInterceptor implements NestInterceptor {
       correlationId,
     });
 
-    // Create consumer span and extract context for message processing
-    if (!isTracingEnabled()) {
-      return next.handle().pipe(
-        catchError(async (error) => {
-          return this.handleError(
-            error,
-            message,
-            topic,
-            partition,
-            handlerMetadata,
-            retryOptions,
-            dlqOptions,
-            correlationId,
-            messageId,
-          );
-        }),
-      );
-    }
-
-    // Execute with extracted context from message headers and create consumer span
-    const handlerId = this.createHandlerId(handlerMetadata);
-    const consumerSpan = createConsumerSpan(
-      topic,
-      handlerId,
-      message,
-      partition,
-    );
-
-    return executeWithExtractedContext(message.headers || {}, () => {
-      return executeWithSpanSync(consumerSpan, () => {
-        return next.handle().pipe(
-          catchError(async (error) => {
-            return this.handleError(
-              error,
-              message,
-              topic,
-              partition,
-              handlerMetadata,
-              retryOptions,
-              dlqOptions,
-              correlationId,
-              messageId,
-            );
-          }),
+    // Process message with retry handling
+    return next.handle().pipe(
+      catchError(async (error) => {
+        return this.handleError(
+          error,
+          message,
+          topic,
+          partition,
+          handlerMetadata,
+          retryOptions,
+          dlqOptions,
+          correlationId,
+          messageId,
         );
-      });
-    });
+      }),
+    );
   }
 
   private async handleError(
@@ -185,28 +145,16 @@ export class RetryInterceptor implements NestInterceptor {
         delayMs: delay,
       });
 
-      // Create retry span if tracing is enabled
-      if (isTracingEnabled()) {
-        const handlerId = this.createHandlerId(handlerMetadata);
-        const retrySpan = createRetrySpan(
-          topic,
-          handlerId,
-          retryCount + 1,
-          delay,
-        );
+      // Create retry span and publish to retry topic
+      const handlerId = this.createHandlerId(handlerMetadata);
+      const retrySpan = createRetrySpan(
+        topic,
+        handlerId,
+        retryCount + 1,
+        delay,
+      );
 
-        await executeWithSpan(retrySpan, async () => {
-          await this.publishToRetryTopic(
-            message,
-            topic,
-            partition,
-            retryCount + 1,
-            delay,
-            correlationId || null,
-            handlerMetadata,
-          );
-        });
-      } else {
+      await executeWithSpan(retrySpan, async () => {
         await this.publishToRetryTopic(
           message,
           topic,
@@ -216,7 +164,7 @@ export class RetryInterceptor implements NestInterceptor {
           correlationId || null,
           handlerMetadata,
         );
-      }
+      });
 
       // Don't re-throw - we've handled the retry by publishing to retry topic
       return;

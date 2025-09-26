@@ -5,6 +5,7 @@ import { KafkaHandlerRegistry } from '../../src/services/kafka.registry';
 import { KafkaRetryService } from '../../src/services/kafka.retry.service';
 import { KafkaDlqService } from '../../src/services/kafka.dlq.service';
 import { AppService } from './app.service';
+import { trace } from '@opentelemetry/api';
 
 @Injectable()
 @Controller()
@@ -161,6 +162,7 @@ export class AppController {
         messages: '/messages',
         stats: '/stats',
         send: 'POST /test/send',
+        trace: 'POST /test/trace',
         reset: 'POST /reset',
         dlq: {
           status: '/dlq/status',
@@ -268,6 +270,92 @@ export class AppController {
       timestamp: new Date().toISOString(),
       ...this.appService.getStats(),
     };
+  }
+
+  @Post('test/trace')
+  async sendTracedMessage(@Body() body: {
+    topic?: string;
+    payload?: any;
+    scenario?: string;
+    correlationId?: string;
+  }) {
+    const { topic, payload, scenario, correlationId } = body;
+
+    // Get current trace context for response info
+    const activeSpan = trace.getActiveSpan();
+    const traceId = activeSpan?.spanContext().traceId;
+    const spanId = activeSpan?.spanContext().spanId;
+
+    try {
+      // Predefined test scenarios - correlation ID will be auto-generated if not provided
+      const scenarios = {
+        'trace-immediate': {
+          topic: 'example.immediate.success',
+          payload: {
+            id: `trace-immediate-${Date.now()}`,
+            message: 'Test immediate success with auto tracing',
+          },
+        },
+        'trace-retry': {
+          topic: 'example.retry.success',
+          payload: {
+            id: `trace-retry-${Date.now()}`,
+            shouldFail: true,
+            message: 'Test retry mechanism with auto tracing',
+          },
+        },
+        'trace-dlq': {
+          topic: 'example.dlq.test',
+          payload: {
+            id: `trace-dlq-${Date.now()}`,
+            action: 'fail',
+            message: 'Test DLQ functionality with auto tracing',
+          },
+        },
+      };
+
+      let messageToSend: { topic: string; payload: any };
+
+      if (scenario && scenarios[scenario]) {
+        messageToSend = scenarios[scenario];
+      } else if (topic && payload) {
+        messageToSend = { topic, payload };
+      } else {
+        // Default to trace-retry scenario
+        messageToSend = scenarios['trace-retry'];
+      }
+
+      // Send message with automatic correlation ID propagation
+      // The package will automatically generate and inject correlation ID
+      await this.kafkaProducer.send(messageToSend.topic, {
+        key: messageToSend.payload.id,
+        value: messageToSend.payload,
+        correlationId, // Optional: provide explicit correlation ID
+      });
+
+      this.logger.log(`📤 Sent traced message to ${messageToSend.topic}: ${JSON.stringify(messageToSend.payload)}`);
+
+      return {
+        success: true,
+        message: 'Traced message sent successfully (automatic correlation propagation)',
+        sent: messageToSend,
+        trace: {
+          traceId,
+          spanId,
+          correlationId: correlationId || 'auto-generated',
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error(`❌ Failed to send traced message:`, error);
+
+      return {
+        success: false,
+        error: error.message,
+        trace: { traceId, spanId },
+        timestamp: new Date().toISOString(),
+      };
+    }
   }
 
   @Post('test/send')

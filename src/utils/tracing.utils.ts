@@ -1,168 +1,22 @@
 import {
   trace,
-  context,
-  propagation,
   SpanKind,
   SpanStatusCode,
   Span,
-  Context,
 } from '@opentelemetry/api';
+import { randomBytes } from 'crypto';
 
 const TRACER_NAME = '@torix/nestjs-kafka';
 
-export interface KafkaSpanAttributes {
-  'messaging.system': string;
-  'messaging.destination': string;
-  'messaging.destination_kind': string;
-  'messaging.kafka.partition'?: number;
-  'messaging.kafka.offset'?: number;
-  'messaging.kafka.consumer_group'?: string;
-  'messaging.message_id'?: string;
-  'messaging.kafka.retry_count'?: number;
-  'kafka.handler_id'?: string;
-}
-
 /**
- * Check if OpenTelemetry API is available
+ * Get the OpenTelemetry tracer, returns undefined if not available
  */
-export function isTracingEnabled(): boolean {
+function getTracer() {
   try {
-    return trace.getTracer !== undefined;
+    return trace.getTracer(TRACER_NAME);
   } catch {
-    return false;
+    return undefined;
   }
-}
-
-/**
- * Get the OpenTelemetry tracer
- */
-export function getTracer() {
-  if (!isTracingEnabled()) {
-    // Return a no-op tracer if tracing is not available
-    return {
-      startSpan: () => ({
-        setStatus: () => {},
-        setAttributes: () => {},
-        end: () => {},
-      }),
-    } as any;
-  }
-  return trace.getTracer(TRACER_NAME);
-}
-
-/**
- * Extract OpenTelemetry context from Kafka message headers
- */
-export function extractContextFromHeaders(
-  headers: Record<string, any> = {},
-): Context {
-  if (!isTracingEnabled()) {
-    return context.active();
-  }
-
-  const headerCarrier: Record<string, string> = {};
-
-  // Convert headers to string format expected by propagation API
-  Object.entries(headers).forEach(([key, value]) => {
-    if (value !== null && value !== undefined) {
-      headerCarrier[key] = String(value);
-    }
-  });
-
-  return propagation.extract(context.active(), headerCarrier);
-}
-
-/**
- * Inject OpenTelemetry context into Kafka message headers
- */
-export function injectContextIntoHeaders(
-  headers: Record<string, string> = {},
-  ctx?: Context,
-): Record<string, string> {
-  if (!isTracingEnabled()) {
-    return headers;
-  }
-
-  const activeContext = ctx || context.active();
-  const headerCarrier: Record<string, string> = { ...headers };
-
-  propagation.inject(activeContext, headerCarrier);
-
-  return headerCarrier;
-}
-
-/**
- * Create a span for Kafka message production
- */
-export function createProducerSpan(
-  topic: string,
-  key?: string,
-  partition?: number,
-): Span {
-  const tracer = getTracer();
-
-  const attributes: KafkaSpanAttributes = {
-    'messaging.system': 'kafka',
-    'messaging.destination': topic,
-    'messaging.destination_kind': 'topic',
-  };
-
-  if (partition !== undefined) {
-    attributes['messaging.kafka.partition'] = partition;
-  }
-
-  if (key) {
-    attributes['messaging.message_id'] = key;
-  }
-
-  return tracer.startSpan(`${topic} send`, {
-    kind: SpanKind.PRODUCER,
-    attributes,
-  });
-}
-
-/**
- * Create a span for Kafka message consumption
- */
-export function createConsumerSpan(
-  topic: string,
-  handlerId: string,
-  message: any,
-  partition: number,
-  consumerGroup?: string,
-): Span {
-  const tracer = getTracer();
-
-  const attributes: KafkaSpanAttributes = {
-    'messaging.system': 'kafka',
-    'messaging.destination': topic,
-    'messaging.destination_kind': 'topic',
-    'messaging.kafka.partition': partition,
-    'kafka.handler_id': handlerId,
-  };
-
-  if (message.offset !== undefined) {
-    attributes['messaging.kafka.offset'] = parseInt(message.offset, 10);
-  }
-
-  if (message.key) {
-    attributes['messaging.message_id'] = message.key;
-  }
-
-  if (consumerGroup) {
-    attributes['messaging.kafka.consumer_group'] = consumerGroup;
-  }
-
-  // Add retry count if present
-  const retryCount = parseInt(message.headers?.['x-retry-count'] || '0', 10);
-  if (retryCount > 0) {
-    attributes['messaging.kafka.retry_count'] = retryCount;
-  }
-
-  return tracer.startSpan(`${topic} receive`, {
-    kind: SpanKind.CONSUMER,
-    attributes,
-  });
 }
 
 /**
@@ -173,8 +27,9 @@ export function createRetrySpan(
   handlerId: string,
   retryCount: number,
   delayMs: number,
-): Span {
+): Span | undefined {
   const tracer = getTracer();
+  if (!tracer) return undefined;
 
   const attributes = {
     'messaging.system': 'kafka',
@@ -200,8 +55,9 @@ export function createDlqSpan(
   handlerId: string,
   retryCount: number,
   operation: 'store' | 'reprocess',
-): Span {
+): Span | undefined {
   const tracer = getTracer();
+  if (!tracer) return undefined;
 
   const attributes = {
     'messaging.system': 'kafka',
@@ -219,12 +75,28 @@ export function createDlqSpan(
 }
 
 /**
- * Get correlation ID from current span baggage or headers
+ * Generate a new correlation ID
+ */
+function generateCorrelationId(): string {
+  return `corr-${randomBytes(8).toString('hex')}-${Date.now()}`;
+}
+
+/**
+ * Get correlation ID from current tracing context
+ * This is a placeholder for future baggage implementation
+ */
+function getCorrelationIdFromContext(): string | undefined {
+  // Future enhancement: extract from OpenTelemetry baggage
+  // For now, we rely on header propagation
+  return undefined;
+}
+
+/**
+ * Get correlation ID from headers (legacy support)
  */
 export function getCorrelationId(
   headers?: Record<string, any>,
 ): string | undefined {
-  // First try to get from headers (existing functionality)
   if (headers) {
     const correlationId =
       headers['x-correlation-id'] || headers['correlationId'];
@@ -232,11 +104,39 @@ export function getCorrelationId(
       return String(correlationId);
     }
   }
-
-  // TODO: In future versions, we could extract from span baggage
-  // This would require OpenTelemetry baggage API support
-
   return undefined;
+}
+
+/**
+ * Get or generate correlation ID from multiple sources with precedence:
+ * 1. Explicit correlationId parameter (highest priority)
+ * 2. Headers (for backward compatibility)
+ * 3. OpenTelemetry context (future enhancement)
+ * 4. Auto-generate new ID (fallback)
+ */
+export function getOrGenerateCorrelationId(
+  explicitId?: string,
+  headers?: Record<string, any>,
+): string {
+  // 1. Use explicit ID if provided
+  if (explicitId) {
+    return explicitId;
+  }
+
+  // 2. Check headers for backward compatibility
+  const headerCorrelationId = getCorrelationId(headers);
+  if (headerCorrelationId) {
+    return headerCorrelationId;
+  }
+
+  // 3. Check OpenTelemetry context (future enhancement)
+  const contextCorrelationId = getCorrelationIdFromContext();
+  if (contextCorrelationId) {
+    return contextCorrelationId;
+  }
+
+  // 4. Generate new correlation ID
+  return generateCorrelationId();
 }
 
 /**
@@ -262,63 +162,24 @@ export function setSpanError(span: Span, error: Error): void {
 }
 
 /**
- * Execute a function within a span context
+ * Execute a function within a span context with error handling
  */
 export async function executeWithSpan<T>(
-  span: Span,
+  span: Span | undefined,
   fn: () => Promise<T> | T,
 ): Promise<T> {
-  if (!isTracingEnabled()) {
+  if (!span) {
     return await fn();
   }
 
-  return context.with(trace.setSpan(context.active(), span), async () => {
-    try {
-      const result = await fn();
-      span.setStatus({ code: SpanStatusCode.OK });
-      return result;
-    } catch (error) {
-      setSpanError(span, error as Error);
-      throw error;
-    } finally {
-      span.end();
-    }
-  });
-}
-
-/**
- * Execute a function within a span context (sync version for RxJS)
- */
-export function executeWithSpanSync<T>(span: Span, fn: () => T): T {
-  if (!isTracingEnabled()) {
-    return fn();
+  try {
+    const result = await fn();
+    span.setStatus({ code: SpanStatusCode.OK });
+    return result;
+  } catch (error) {
+    setSpanError(span, error as Error);
+    throw error;
+  } finally {
+    span.end();
   }
-
-  return context.with(trace.setSpan(context.active(), span), () => {
-    try {
-      const result = fn();
-      span.setStatus({ code: SpanStatusCode.OK });
-      return result;
-    } catch (error) {
-      setSpanError(span, error as Error);
-      throw error;
-    } finally {
-      span.end();
-    }
-  });
-}
-
-/**
- * Execute a function within an extracted context
- */
-export function executeWithExtractedContext<T>(
-  headers: Record<string, any>,
-  fn: () => T,
-): T {
-  if (!isTracingEnabled()) {
-    return fn();
-  }
-
-  const extractedContext = extractContextFromHeaders(headers);
-  return context.with(extractedContext, fn);
 }

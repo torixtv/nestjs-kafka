@@ -20,11 +20,7 @@ import {
 import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
 import { KafkaHandlerRegistry } from './kafka.registry';
 import { KafkaProducerService } from '../core/kafka.producer';
-import {
-  createDlqSpan,
-  executeWithSpan,
-  isTracingEnabled,
-} from '../utils/tracing.utils';
+import { createDlqSpan, executeWithSpan } from '../utils/tracing.utils';
 
 export interface DlqMessageHeaders {
   'x-original-topic': string;
@@ -304,22 +300,18 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
       'x-retry-count': retryCountStr,
     } = headers;
 
-    // Create DLQ reprocess span if tracing is enabled
-    if (isTracingEnabled()) {
-      const retryCount = parseInt(retryCountStr || '0', 10);
-      const dlqSpan = createDlqSpan(
-        originalTopic,
-        handlerId,
-        retryCount,
-        'reprocess',
-      );
+    // Create DLQ reprocess span and reprocess message
+    const retryCount = parseInt(retryCountStr || '0', 10);
+    const dlqSpan = createDlqSpan(
+      originalTopic,
+      handlerId,
+      retryCount,
+      'reprocess',
+    );
 
-      await executeWithSpan(dlqSpan, async () => {
-        await this.reprocessMessageInternal(payload, headers);
-      });
-    } else {
+    await executeWithSpan(dlqSpan, async () => {
       await this.reprocessMessageInternal(payload, headers);
-    }
+    });
   }
 
   private async reprocessMessageInternal(
@@ -409,26 +401,15 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Create DLQ span if tracing is enabled
-    if (isTracingEnabled()) {
-      const dlqSpan = createDlqSpan(
-        originalTopic,
-        handlerId,
-        retryCount,
-        'store',
-      );
+    // Create DLQ span and store to DLQ
+    const dlqSpan = createDlqSpan(
+      originalTopic,
+      handlerId,
+      retryCount,
+      'store',
+    );
 
-      await executeWithSpan(dlqSpan, async () => {
-        await this.storeToDlqInternal(
-          message,
-          error,
-          originalTopic,
-          handlerId,
-          retryCount,
-          correlationId,
-        );
-      });
-    } else {
+    await executeWithSpan(dlqSpan, async () => {
       await this.storeToDlqInternal(
         message,
         error,
@@ -437,7 +418,7 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
         retryCount,
         correlationId,
       );
-    }
+    });
   }
 
   private async storeToDlqInternal(
