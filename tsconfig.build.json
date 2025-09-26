@@ -16,6 +16,7 @@
     "**/*test.ts",
     "**/*.test.ts",
     "integration-test",
-    "examples"
+    "examples",
+    "example"
   ]
 }

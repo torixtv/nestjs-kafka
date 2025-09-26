@@ -10,10 +10,8 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "require": "./dist/index.js",
-      "import": "./dist/index.js"
-    },
-    "./package.json": "./package.json"
+      "require": "./dist/index.js"
+    }
   },
   "files": [
     "dist/**/*",
@@ -25,22 +23,36 @@
     "events",
     "microservices",
     "retry",
-    "dlq"
+    "dlq",
+    "event-driven",
+    "background-jobs",
+    "typescript",
+    "decorators",
+    "queue",
+    "async",
+    "messaging",
+    "observability"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/torix/kafka-events.git"
   },
+  "bugs": {
+    "url": "https://github.com/torix/kafka-events/issues"
+  },
+  "homepage": "https://github.com/torix/kafka-events#readme",
   "scripts": {
     "build": "nest build",
-    "build:lib": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "npm run build:lib",
+    "build:watch": "nest build --watch",
+    "dev": "nest build --watch",
+    "prepublishOnly": "npm run lint && npm run build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
-    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
+    "lint": "eslint \"src/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
+    "test:e2e": "jest --config jest.integration.config.js",
     "test:integration": "jest --config jest.integration.config.js",
     "test:unit": "jest --testPathIgnorePatterns=integration"
   },
@@ -83,28 +95,5 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0"
-  },
-  "jest": {
-    "moduleFileExtensions": [
-      "js",
-      "json",
-      "ts"
-    ],
-    "rootDir": ".",
-    "testRegex": ".*\\.spec\\.ts$",
-    "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
-    },
-    "collectCoverageFrom": [
-      "src/**/*.(t|j)s",
-      "!src/**/*.spec.ts",
-      "!src/**/*.d.ts"
-    ],
-    "coverageDirectory": "coverage",
-    "testEnvironment": "node",
-    "moduleNameMapping": {
-      "^@torix/kafka-events/(.*)$": "<rootDir>/src/$1"
-    },
-    "setupFilesAfterEnv": ["<rootDir>/test/setup.ts"]
   }
 }

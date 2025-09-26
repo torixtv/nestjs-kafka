@@ -19,6 +19,8 @@ A **production-ready**, simplified NestJS Kafka events package with built-in ret
 - **🛡️ Type Safety** - Full TypeScript support with strict typing
 - **🔧 Flexible Configuration** - Environment-based configuration with validation
 - **📈 Scalable Design** - Handles high-throughput scenarios with proper offset management
+- **🔍 OpenTelemetry Integration** - Built-in distributed tracing with KafkaJS auto-instrumentation
+- **🔗 Automatic Correlation ID Propagation** - Zero-config correlation tracking across message flows
 
 ## 📋 Table of Contents
 
@@ -26,6 +28,7 @@ A **production-ready**, simplified NestJS Kafka events package with built-in ret
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
+- [OpenTelemetry & Tracing](#opentelemetry--tracing)
 - [Usage Examples](#usage-examples)
 - [API Reference](#api-reference)
 - [Monitoring & Operations](#monitoring--operations)
@@ -332,6 +335,291 @@ async function bootstrap() {
 bootstrap();
 ```
 
+## 🔍 OpenTelemetry & Tracing
+
+The package provides built-in support for **OpenTelemetry distributed tracing** with automatic **correlation ID propagation**. It seamlessly integrates with KafkaJS auto-instrumentation while adding custom spans for retry and DLQ operations.
+
+### 🚀 Zero-Configuration Tracing
+
+The package automatically handles correlation ID propagation without requiring manual setup:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { KafkaProducerService } from '@torix/nestjs-kafka';
+
+@Injectable()
+export class OrderService {
+  constructor(private readonly producer: KafkaProducerService) {}
+
+  async createOrder(order: Order): Promise<void> {
+    // Correlation ID is automatically generated and propagated
+    await this.producer.send('order.created', {
+      key: order.id,
+      value: order,
+      // No need to manually manage correlation IDs!
+    });
+  }
+
+  // Optional: Provide explicit correlation ID
+  async createOrderWithCorrelation(order: Order, correlationId: string): Promise<void> {
+    await this.producer.send('order.created', {
+      key: order.id,
+      value: order,
+      correlationId, // Explicitly provided correlation ID
+    });
+  }
+}
+```
+
+### 📡 OpenTelemetry Setup
+
+Install OpenTelemetry dependencies for your application:
+
+```bash
+npm install @opentelemetry/api @opentelemetry/sdk-node @opentelemetry/auto-instrumentations-node
+```
+
+Create a tracing setup file (`src/tracing.ts`):
+
+```typescript
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { ConsoleSpanExporter } from '@opentelemetry/sdk-trace-node';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { Resource } from '@opentelemetry/resources';
+import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
+
+// Initialize OpenTelemetry
+const sdk = new NodeSDK({
+  resource: new Resource({
+    [ATTR_SERVICE_NAME]: 'my-kafka-service',
+    [ATTR_SERVICE_VERSION]: '1.0.0',
+  }),
+  traceExporter: new ConsoleSpanExporter(), // Use OTLP exporter in production
+  instrumentations: [
+    getNodeAutoInstrumentations({
+      // Enable KafkaJS instrumentation
+      '@opentelemetry/instrumentation-kafkajs': {
+        enabled: true,
+      },
+      // Enable HTTP instrumentation for REST APIs
+      '@opentelemetry/instrumentation-http': {
+        enabled: true,
+      },
+      // Disable fs instrumentation to reduce noise
+      '@opentelemetry/instrumentation-fs': {
+        enabled: false,
+      },
+    }),
+  ],
+});
+
+// Start the SDK
+sdk.start();
+console.log('🔍 OpenTelemetry tracing initialized');
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  sdk.shutdown()
+    .then(() => console.log('✅ OpenTelemetry terminated'))
+    .catch((error) => console.log('❌ Error terminating OpenTelemetry', error))
+    .finally(() => process.exit(0));
+});
+
+export default sdk;
+```
+
+Import tracing at the very beginning of your `main.ts`:
+
+```typescript
+// Initialize tracing BEFORE any other imports
+import './tracing';
+
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  // ... rest of your bootstrap
+}
+bootstrap();
+```
+
+### 🔗 Trace Context Flow
+
+The package creates a complete trace context that flows through all operations:
+
+```mermaid
+graph LR
+    A[HTTP Request] --> B[Producer Span]
+    B --> C[Consumer Span]
+    C --> D[Handler Execution]
+
+    D --> E{Success?}
+    E -->|No| F[Retry Span]
+    F --> G[Retry Consumer]
+    G --> D
+
+    E -->|Max Retries| H[DLQ Span]
+    H --> I[DLQ Storage]
+
+    style A fill:#e3f2fd
+    style F fill:#fff3e0
+    style H fill:#fce4ec
+```
+
+**Automatic Spans Created:**
+- **HTTP Request Spans** (via `@opentelemetry/instrumentation-http`)
+- **Kafka Producer Spans** (via `@opentelemetry/instrumentation-kafkajs`)
+- **Kafka Consumer Spans** (via `@opentelemetry/instrumentation-kafkajs`)
+- **Custom Retry Spans** (by this package)
+- **Custom DLQ Spans** (by this package)
+
+### 📊 Trace Attributes
+
+Each span includes comprehensive attributes for observability:
+
+**Producer Spans:**
+```typescript
+{
+  'messaging.system': 'kafka',
+  'messaging.destination': 'order.created',
+  'messaging.destination_kind': 'topic',
+  'messaging.kafka.message_key': 'order-123',
+  'x-correlation-id': 'corr-abc123-1234567890'
+}
+```
+
+**Retry Spans:**
+```typescript
+{
+  'messaging.system': 'kafka',
+  'messaging.destination': 'order.created',
+  'kafka.handler_id': 'OrderService.handleOrderCreated',
+  'messaging.kafka.retry_count': 2,
+  'kafka.retry.delay_ms': 4000,
+  'kafka.operation': 'retry'
+}
+```
+
+**DLQ Spans:**
+```typescript
+{
+  'messaging.system': 'kafka',
+  'messaging.destination': 'order.created',
+  'kafka.handler_id': 'OrderService.handleOrderCreated',
+  'messaging.kafka.retry_count': 3,
+  'kafka.operation': 'dlq_store'
+}
+```
+
+### 🎯 Correlation ID Management
+
+The package provides intelligent correlation ID handling with multiple fallback strategies:
+
+```typescript
+// 1. Explicit correlation ID (highest priority)
+await producer.send('topic', {
+  value: data,
+  correlationId: 'explicit-correlation-id'
+});
+
+// 2. Header-based correlation ID (backward compatibility)
+await producer.send('topic', {
+  value: data,
+  headers: {
+    'x-correlation-id': 'header-correlation-id'
+  }
+});
+
+// 3. Auto-generated correlation ID (fallback)
+await producer.send('topic', {
+  value: data
+  // Correlation ID automatically generated: 'corr-{random}-{timestamp}'
+});
+```
+
+### 🔧 Tracing Utilities
+
+The package exports tracing utilities for advanced use cases:
+
+```typescript
+import {
+  getCorrelationId,
+  getOrGenerateCorrelationId,
+  createRetrySpan,
+  createDlqSpan,
+  executeWithSpan,
+  setSpanError
+} from '@torix/nestjs-kafka';
+
+// Extract correlation ID from headers
+const correlationId = getCorrelationId(headers);
+
+// Create custom spans for business logic
+const span = createRetrySpan('order.created', 'OrderService.handleOrderCreated', 2, 4000);
+
+// Execute code within span context
+await executeWithSpan(span, async () => {
+  // Your code here
+  throw new Error('Something went wrong');
+});
+```
+
+### 🏭 Production Configuration
+
+For production environments, configure proper trace exporters:
+
+```typescript
+// Production tracing setup
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-otlp-http';
+
+const sdk = new NodeSDK({
+  resource: new Resource({
+    [ATTR_SERVICE_NAME]: process.env.SERVICE_NAME || 'kafka-service',
+    [ATTR_SERVICE_VERSION]: process.env.SERVICE_VERSION || '1.0.0',
+    [ATTR_DEPLOYMENT_ENVIRONMENT]: process.env.NODE_ENV || 'production',
+  }),
+  traceExporter: new OTLPTraceExporter({
+    url: process.env.OTLP_TRACE_ENDPOINT || 'http://jaeger:14268/api/traces',
+    headers: {
+      'Authorization': `Bearer ${process.env.OTLP_TOKEN}`,
+    },
+  }),
+  instrumentations: [getNodeAutoInstrumentations()],
+});
+```
+
+### 📈 Observability Benefits
+
+With OpenTelemetry integration, you get:
+
+- **End-to-End Tracing**: Follow requests from HTTP to Kafka to retry to DLQ
+- **Performance Monitoring**: Identify bottlenecks in message processing
+- **Error Tracking**: Correlate failures across retry attempts
+- **Service Dependencies**: Visualize Kafka topic relationships
+- **Correlation Tracking**: Link related operations across microservices
+
+### 🔍 Example Trace Flow
+
+Here's what a complete trace looks like:
+
+```
+HTTP POST /orders
+├── http_request (span)
+│   ├── kafka_producer (span) - topic: order.created
+│   │   └── kafka_consumer (span) - topic: order.created
+│   │       ├── order_processing (span) - FAILED
+│   │       └── kafka_retry (span) - attempt 1, delay: 2s
+│   │           └── kafka_consumer (span) - topic: __retry_topic
+│   │               ├── order_processing (span) - FAILED
+│   │               └── kafka_retry (span) - attempt 2, delay: 4s
+│   │                   └── kafka_consumer (span) - topic: __retry_topic
+│   │                       ├── order_processing (span) - FAILED
+│   │                       └── kafka_dlq_store (span) - stored to DLQ
+└── All spans share the same trace ID and correlation ID
+```
+
 ## 💡 Usage Examples
 
 ### Handler with Custom Retry Configuration
@@ -410,8 +698,8 @@ export class NotificationService {
         customerEmail: order.customerEmail,
         items: order.items,
       },
+      correlationId: order.correlationId, // Explicit correlation ID
       headers: {
-        'correlation-id': order.correlationId,
         'source-service': 'order-service',
         'event-version': '2.0',
         'timestamp': new Date().toISOString(),
@@ -529,6 +817,10 @@ interface MessagePayload {
   key?: string;
   value: any;
   headers?: Record<string, string>;
+  partition?: number;
+  timestamp?: string;
+  /** Optional correlation ID for tracing. If not provided, one will be auto-generated. */
+  correlationId?: string;
 }
 ```
 

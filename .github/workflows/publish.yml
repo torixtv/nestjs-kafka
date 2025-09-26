@@ -1,0 +1,158 @@
+name: Publish to NPM
+
+permissions:
+  contents: write
+  packages: write
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+      dry_run:
+        description: 'Dry run (skip actual publishing)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Build package
+        run: npm run build
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Verify build artifacts
+        run: |
+          test -f dist/index.js
+          test -f dist/index.d.ts
+
+  publish:
+    name: Publish to NPM
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for semantic versioning
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build package
+        run: npm run build
+
+      - name: Extract version from release tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "PACKAGE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Publishing version: $VERSION"
+
+      - name: Set version for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          npm version ${{ github.event.inputs.version_type }} --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          echo "PACKAGE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Publishing version: $VERSION"
+
+      - name: Update package version
+        if: github.event_name == 'release'
+        run: |
+          npm version $PACKAGE_VERSION --no-git-tag-version --allow-same-version
+
+      - name: Verify package contents
+        run: |
+          npm pack --dry-run
+          echo "Package contents:"
+          tar -tzf "$(npm pack --dry-run --silent | tail -1)" | head -20
+
+      - name: Publish to NPM (dry run)
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          echo "Dry run - would publish version $PACKAGE_VERSION"
+          npm publish --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to NPM
+        if: github.event.inputs.dry_run != 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create Git tag (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a "v$PACKAGE_VERSION" -m "Release v$PACKAGE_VERSION"
+          git push origin "v$PACKAGE_VERSION"
+
+      - name: Update package-lock.json
+        if: (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true') || github.event_name == 'release'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to $PACKAGE_VERSION [skip ci]" || exit 0
+          git push origin ${{ github.ref_name }}
+
+  notify:
+    name: Notify Success
+    needs: [publish]
+    runs-on: ubuntu-latest
+    if: success() && github.event.inputs.dry_run != 'true'
+
+    steps:
+      - name: Notify success
+        run: |
+          echo "✅ Successfully published @torix/nestjs-kafka@$PACKAGE_VERSION to NPM"
+          echo "📦 Package: https://www.npmjs.com/package/@torix/nestjs-kafka"
+          echo "🏷️ Release: ${{ github.event.release.html_url || 'Manual dispatch' }}"

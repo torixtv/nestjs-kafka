@@ -3,6 +3,19 @@
   "collection": "@nestjs/schematics",
   "sourceRoot": "src",
   "compilerOptions": {
-    "deleteOutDir": true
+    "deleteOutDir": true,
+    "webpack": false,
+    "tsConfigPath": "tsconfig.build.json"
+  },
+  "projects": {
+    "@torix/nestjs-kafka": {
+      "type": "library",
+      "root": "",
+      "entryFile": "index",
+      "sourceRoot": "src",
+      "compilerOptions": {
+        "tsConfigPath": "tsconfig.build.json"
+      }
+    }
   }
 }
