@@ -1,5 +1,5 @@
 {
-  "name": "@torix/nestjs-kafka",
+  "name": "@torixtv/nestjs-kafka",
   "version": "0.1.0",
   "description": "A simplified, reusable NestJS Kafka events package with retry and DLQ support",
   "author": "Torix Team",
@@ -35,12 +35,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/torix/kafka-events.git"
+    "url": "git+https://github.com/torixtv/nestjs-kafka.git"
   },
   "bugs": {
-    "url": "https://github.com/torix/kafka-events/issues"
+    "url": "https://github.com/torixtv/nestjs-kafka/issues"
   },
-  "homepage": "https://github.com/torix/kafka-events#readme",
+  "homepage": "https://github.com/torixtv/nestjs-kafka#readme",
   "scripts": {
     "build": "nest build",
     "build:watch": "nest build --watch",

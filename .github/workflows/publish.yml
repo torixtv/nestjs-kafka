@@ -160,6 +160,6 @@ jobs:
     steps:
       - name: Notify success
         run: |
-          echo "✅ Successfully published @torix/nestjs-kafka@$PACKAGE_VERSION to NPM"
-          echo "📦 Package: https://www.npmjs.com/package/@torix/nestjs-kafka"
+          echo "✅ Successfully published @torixtv/nestjs-kafka@$PACKAGE_VERSION to NPM"
+          echo "📦 Package: https://www.npmjs.com/package/@torixtv/nestjs-kafka"
           echo "🏷️ Release: ${{ github.event.release.html_url || 'Manual dispatch' }}"
