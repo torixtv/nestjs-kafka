@@ -6,7 +6,7 @@ import { EventHandlerMetadata } from '../interfaces/kafka.interfaces';
 
 export interface RegisteredHandler {
   instance: any;
-  method: Function;
+  method: (payload: any) => Promise<any>;
   methodName: string;
   pattern: string;
   metadata: EventHandlerMetadata;
