@@ -38,9 +38,11 @@ import { KafkaModule } from '../../src/core/kafka.module';
       dlq: {
         enabled: true,
       },
+      // monitoring is enabled by default - no need to specify
+      // monitoring: { enabled: true, path: 'kafka' },
     }),
   ],
-  controllers: [AppController],
+  controllers: [AppController], // KafkaMonitoringController is auto-registered by KafkaModule
   providers: [AppService],
 })
 export class AppModule {}

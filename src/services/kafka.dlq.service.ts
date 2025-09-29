@@ -35,6 +35,7 @@ export interface DlqMessageHeaders {
 }
 
 export interface DlqReprocessingOptions {
+  topic: string; // Required: which topic to reprocess (e.g., 'user.created')
   batchSize?: number;
   timeoutMs?: number;
   stopOnError?: boolean;
@@ -139,38 +140,42 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async startReprocessing(options: DlqReprocessingOptions = {}): Promise<void> {
+  async startReprocessing(options: DlqReprocessingOptions): Promise<void> {
+    // Validate: topic is required
+    if (!options.topic) {
+      throw new Error('topic is required for DLQ reprocessing');
+    }
+
     if (!this.options.dlq?.enabled) {
       throw new Error('DLQ is not enabled');
     }
 
     if (this.isReprocessing) {
-      this.logger.warn('DLQ reprocessing is already in progress');
-      return;
+      throw new Error('DLQ reprocessing is already in progress');
     }
 
+    const baseGroupId = this.options.client?.clientId || 'kafka-service';
+    const topicSafe = options.topic.replace(/[^a-zA-Z0-9]/g, '-');
+
+    // Create persistent consumer group per topic for efficient reprocessing
+    const reprocessingGroupId = `${baseGroupId}.dlq.reprocess.${topicSafe}`;
+
     this.logger.log(
-      `Starting DLQ reprocessing for topic: ${this.dlqTopicName}`,
+      `Starting DLQ reprocessing for topic: ${options.topic} (group: ${reprocessingGroupId})`,
     );
     this.isReprocessing = true;
     this.metrics.reprocessingSessions++;
 
-    // Use client ID as base for DLQ consumer group to avoid conflicts
-    const baseGroupId = this.options.client?.clientId || 'kafka-service';
-
-    // Create a fixed consumer group for DLQ reprocessing to avoid proliferation
-    const reprocessingGroupId = `${baseGroupId}.dlq.reprocessing`;
     this.reprocessingConsumer = this.kafka.consumer({
       groupId: reprocessingGroupId,
     });
 
     try {
       await this.reprocessingConsumer.connect();
-      // Subscribe with fromBeginning to reprocess all messages in DLQ
-      // This ensures we reprocess all failed messages when requested
+      // Resume from last committed offset (no re-reading entire DLQ)
       await this.reprocessingConsumer.subscribe({
         topic: this.dlqTopicName,
-        fromBeginning: true,
+        fromBeginning: false, // Continue from where this consumer group left off
       });
 
       const startTime = Date.now();
@@ -179,24 +184,32 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
       const stopOnError = options.stopOnError ?? false;
 
       let processedCount = 0;
+      let skippedCount = 0;
       let lastMessageTime = Date.now();
 
       await this.reprocessingConsumer.run({
-        autoCommit: true,
+        autoCommit: true, // Safe! We skip non-matching messages but commit anyway
         partitionsConsumedConcurrently: 1,
         eachMessage: async (payload) => {
-          const { message, partition, topic } = payload;
+          const { message } = payload;
 
           try {
             const headers = this.extractHeaders(message);
             if (!headers) {
               this.logger.warn('Skipping message with invalid DLQ headers');
               this.metrics.messagesSkipped++;
-              return;
+              skippedCount++;
+              return; // Skip, commit anyway - invalid message
+            }
+
+            // Filter: Only process messages from specified topic
+            if (headers['x-original-topic'] !== options.topic) {
+              skippedCount++;
+              return; // Skip, commit anyway - different topic
             }
 
             this.logger.debug(
-              `Reprocessing DLQ message - Handler: ${headers['x-handler-id']}, Original Topic: ${headers['x-original-topic']}`,
+              `Reprocessing DLQ message - Topic: ${options.topic}, Handler: ${headers['x-handler-id']}`,
             );
 
             await this.reprocessMessage(payload, headers);
@@ -225,7 +238,7 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
               throw error;
             }
 
-            // With autoCommit, Kafka will handle offset management automatically
+            // Continue processing, commit anyway (don't infinite loop)
           }
         },
       });

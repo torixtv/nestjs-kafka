@@ -26,6 +26,7 @@ export type {
   KafkaConsumerSubscription,
   KafkaRetryOptions,
   KafkaDlqOptions,
+  KafkaMonitoringOptions,
   EventHandlerOptions,
 } from './interfaces/kafka.interfaces';
 
@@ -54,3 +55,6 @@ export {
   getOrGenerateCorrelationId,
   setSpanError,
 } from './utils/tracing.utils';
+
+// Monitoring module exports (optional)
+export * from './monitoring';

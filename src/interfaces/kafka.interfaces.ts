@@ -36,6 +36,11 @@ export interface KafkaConsumerSubscription {
   fromBeginning?: boolean;
 }
 
+export interface KafkaMonitoringOptions {
+  enabled?: boolean; // Default: true
+  path?: string;     // Default: 'kafka'
+}
+
 export interface KafkaModuleOptions {
   client?: KafkaConfig;
   consumer?: ConsumerConfig;
@@ -43,6 +48,7 @@ export interface KafkaModuleOptions {
   subscriptions?: KafkaConsumerSubscription;
   retry?: KafkaRetryOptions;
   dlq?: KafkaDlqOptions;
+  monitoring?: KafkaMonitoringOptions;
 }
 
 export interface KafkaModuleOptionsFactory {

@@ -15,6 +15,7 @@ import { KafkaRetryService } from '../services/kafka.retry.service';
 import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaConsumerService } from '../services/kafka.consumer.service';
 import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
+import { KafkaMonitoringController } from '../monitoring/kafka-monitoring.controller';
 
 @Global()
 @Module({
@@ -22,25 +23,38 @@ import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
 })
 export class KafkaModule {
   static forRoot(options: KafkaModuleOptions = {}): DynamicModule {
-    const providers = this.createProviders(options);
+    const mergedOptions = this.mergeWithDefaults(options);
+    const providers = this.createProviders(mergedOptions);
     const imports = [DiscoveryModule];
-    return this.createModule(providers, imports);
+    const controllers = this.shouldEnableMonitoring(mergedOptions)
+      ? [KafkaMonitoringController]
+      : [];
+    return this.createModule(providers, imports, controllers);
   }
 
   static forRootAsync(options: KafkaModuleAsyncOptions): DynamicModule {
     const asyncProviders = this.createAsyncProviders(options);
     const providers = [...asyncProviders, ...this.createSharedProviders()];
     const imports = [DiscoveryModule, ...(options.imports || [])];
-    return this.createModule(providers, imports);
+    // Note: For async, we can't determine monitoring status at build time
+    // So we always include the controller, but it could be made conditional via injection
+    return this.createModule(providers, imports, [KafkaMonitoringController]);
+  }
+
+  private static shouldEnableMonitoring(options: KafkaModuleOptions): boolean {
+    // Monitoring is enabled by default unless explicitly disabled
+    return options.monitoring?.enabled !== false;
   }
 
   private static createModule(
     providers: Provider[],
     imports: any[] = [],
+    controllers: any[] = [],
   ): DynamicModule {
     return {
       module: KafkaModule,
       imports,
+      controllers,
       providers,
       exports: [
         // Core services
@@ -177,6 +191,10 @@ export class KafkaModule {
           stopOnError: false,
         },
       },
+      monitoring: {
+        enabled: true, // Enabled by default
+        path: 'kafka',
+      },
     };
 
     const mergedClient = userOptions.client
@@ -208,6 +226,9 @@ export class KafkaModule {
       dlq: userOptions.dlq
         ? { ...defaults.dlq, ...userOptions.dlq }
         : defaults.dlq,
+      monitoring: userOptions.monitoring
+        ? { ...defaults.monitoring, ...userOptions.monitoring }
+        : defaults.monitoring,
     };
   }
 }

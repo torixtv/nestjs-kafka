@@ -5,6 +5,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2025-01-30
+
+### 🚨 Breaking Changes
+
+#### DLQ Reprocessing Now Requires Topic Parameter
+- **BREAKING:** `DlqReprocessingOptions.topic` is now **required** (was optional)
+- **BREAKING:** Removed `handlerId` parameter from `DlqReprocessingOptions`
+- **BREAKING:** DLQ reprocessing no longer supports "reprocess all" mode
+- **BREAKING:** Monitoring endpoint `POST /kafka/dlq/reprocess` now requires `topic` in request body
+
+**Migration Required:**
+```typescript
+// ❌ Before (no longer supported)
+await dlqService.startReprocessing({
+  batchSize: 100
+});
+
+// ✅ After (topic required)
+await dlqService.startReprocessing({
+  topic: 'user.created',  // Required
+  batchSize: 100
+});
+
+// ❌ Before (handlerId no longer supported)
+await dlqService.startReprocessing({
+  handlerId: 'UserService.handleUserCreated',
+  batchSize: 100
+});
+
+// ✅ After (filter by topic only)
+await dlqService.startReprocessing({
+  topic: 'user.created',  // Filter by topic
+  batchSize: 100
+});
+```
+
+### ✨ Added
+
+#### Topic-Specific DLQ Reprocessing
+- Persistent consumer groups per topic for efficient reprocessing
+- Consumer group naming: `${service}.dlq.reprocess.${topic}`
+- Each topic maintains independent offsets
+- Non-matching messages safely skipped without losing data
+
+#### Monitoring Controller (Auto-Registered)
+- **Automatically registered** by default - no manual import needed
+- Health checks: `/kafka/health`, `/kafka/health/ready`, `/kafka/health/live`
+- Metrics: `/kafka/metrics`
+- DLQ operations: `/kafka/dlq/reprocess`, `/kafka/dlq/stop`
+- Handler inspection: `/kafka/handlers`
+- Metrics reset: `/kafka/metrics/reset`
+- Can be disabled via `monitoring: { enabled: false }` in module options
+
+**Usage (enabled by default):**
+```typescript
+@Module({
+  imports: [KafkaModule.forRoot({ ... })],
+  // KafkaMonitoringController is automatically registered!
+})
+export class AppModule {}
+```
+
+**To disable:**
+```typescript
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      // ... other config
+      monitoring: { enabled: false },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### 🔧 Changed
+
+#### DLQ Reprocessing Behavior
+- Changed from temporary to persistent consumer groups
+- Resume from last committed offset instead of reading from beginning
+- Filter by topic only (simplified from handler-based filtering)
+- Auto-commit enabled for safe offset management
+
+#### DLQ Topic Naming
+- DLQ topic now includes service name: `${service}.dlq`
+- Ensures isolation between different services
+
+### 🐛 Fixed
+
+- Fixed issue where DLQ reprocessing would re-read entire DLQ on each invocation
+- Fixed consumer group proliferation from temporary reprocessing consumers
+
+### 📚 Documentation
+
+- Updated README with topic-specific DLQ reprocessing examples
+- Added explanation of persistent consumer group behavior
+- Updated API reference with new `DlqReprocessingOptions` interface
+- Added monitoring controller usage examples
+
+---
+
 ## [0.2.0] - 2025-01-XX
 
 ### 🚨 Breaking Changes

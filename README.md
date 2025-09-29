@@ -754,34 +754,48 @@ export class PaymentService {
 
 ### DLQ Message Reprocessing
 
+DLQ reprocessing is topic-specific and uses persistent consumer groups to avoid re-reading the entire DLQ.
+
 ```typescript
 @Injectable()
 export class DlqManagementService {
   constructor(private readonly dlqService: KafkaDlqService) {}
 
   async reprocessFailedOrders(): Promise<void> {
-    // Reprocess all DLQ messages for order handlers
-    await this.dlqService.reprocessMessages({
-      handlerId: 'OrderService.handleOrderCreated',
+    // Reprocess DLQ messages for a specific topic
+    // Each topic uses its own consumer group to track progress
+    await this.dlqService.startReprocessing({
+      topic: 'order.created',  // Required: topic to reprocess
       batchSize: 50,
       timeoutMs: 30000,
       stopOnError: false,
     });
   }
 
-  async reprocessAllDlqMessages(): Promise<void> {
-    // Reprocess all messages in DLQ
-    await this.dlqService.reprocessMessages({
+  async reprocessUserEvents(): Promise<void> {
+    // Reprocess user-related events from DLQ
+    await this.dlqService.startReprocessing({
+      topic: 'user.updated',
       batchSize: 100,
       timeoutMs: 60000,
     });
   }
 
   async getDlqStatus(): Promise<any> {
-    return this.dlqService.getStatus();
+    return {
+      topic: this.dlqService.getDlqTopicName(),
+      active: this.dlqService.isReprocessingActive(),
+      metrics: this.dlqService.getMetrics(),
+    };
   }
 }
 ```
+
+**How it works:**
+- Each topic gets its own persistent consumer group: `{service}.dlq.reprocess.{topic}`
+- Consumer groups maintain independent offsets, so each topic's reprocessing starts where it left off
+- Non-matching messages are safely skipped without reprocessing the entire DLQ
+- Use via monitoring API: `POST /kafka/dlq/reprocess` with `{ "topic": "order.created" }`
 
 ### Message Production with Headers
 
@@ -931,16 +945,18 @@ Service for managing Dead Letter Queue operations.
 
 ```typescript
 class KafkaDlqService {
-  async getStatus(): Promise<DlqStatus>
-  async reprocessMessages(options?: DlqReprocessingOptions): Promise<void>
+  getDlqTopicName(): string
+  isReprocessingActive(): boolean
+  getMetrics(): DlqMetrics
+  async startReprocessing(options: DlqReprocessingOptions): Promise<void>
   async stopReprocessing(): Promise<void>
 }
 
 interface DlqReprocessingOptions {
-  handlerId?: string;
-  batchSize?: number;
-  timeoutMs?: number;
-  stopOnError?: boolean;
+  topic: string;           // Required: specific topic to reprocess from DLQ
+  batchSize?: number;      // Default: 100
+  timeoutMs?: number;      // Default: 30000
+  stopOnError?: boolean;   // Default: false
 }
 ```
 
@@ -989,48 +1005,146 @@ interface DlqMessageHeaders {
 
 ## 📊 Monitoring & Operations
 
-### REST API Endpoints
+The package **automatically registers** a monitoring controller for health checks, metrics, and operations.
 
-When running the example application or implementing similar endpoints:
+### Automatic Setup (Default)
+
+The monitoring controller is enabled by default and registers endpoints at `/kafka/*`:
 
 ```typescript
-// Health Check
-GET /health
-Response: { status: 'ok', kafka: 'connected', retry: 'running', dlq: 'ready' }
+@Module({
+  imports: [KafkaModule.forRoot({ /* kafka config */ })],
+  // KafkaMonitoringController is automatically registered!
+})
+export class AppModule {}
+```
 
-// Metrics
-GET /metrics
+### Disabling Monitoring (Optional)
+
+To disable the monitoring controller:
+
+```typescript
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      // ... kafka config
+      monitoring: {
+        enabled: false, // Disable monitoring endpoints
+      },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### Available Endpoints
+
+```typescript
+// Health check
+GET /kafka/health
 Response: {
+  status: "healthy",
+  timestamp: "2025-09-29T10:30:00.000Z",
+  components: {
+    producer: { connected: true },
+    retry: { running: true },
+    dlq: { reprocessing: false },
+    handlers: { registered: 15 }
+  }
+}
+
+// Kubernetes readiness
+GET /kafka/health/ready
+Response: {
+  ready: true,
+  checks: {
+    producer: true,
+    handlers: true
+  }
+}
+
+// Kubernetes liveness
+GET /kafka/health/live
+Response: {
+  alive: true,
+  timestamp: "2025-09-29T10:30:00.000Z"
+}
+```
+
+```typescript
+// Metrics
+GET /kafka/metrics
+Response: {
+  timestamp: "2025-09-29T10:30:00.000Z",
+  handlers: {
+    registered: 15,
+    patterns: ["user.created", "order.placed"]
+  },
   retry: {
-    messagesProcessed: 1250,
-    messagesDelayed: 45,
-    messagesSkipped: 12,
-    errorsEncountered: 23
+    topic: "my-service.retry",
+    running: true,
+    messagesProcessed: 1234,
+    messagesSkipped: 56,
+    messagesDelayed: 89,
+    errorsEncountered: 12
   },
   dlq: {
-    messagesStored: 15,
-    isReprocessing: false
+    topic: "my-service.dlq",
+    reprocessing: false,
+    messagesStored: 45,
+    messagesReprocessed: 23
   }
 }
 
-// DLQ Status
-GET /dlq/status
+// List handlers
+GET /kafka/handlers
 Response: {
-  dlq: {
-    topicName: 'my-service.dlq',
-    enabled: true,
-    isReprocessing: false,
-    topicExists: true
-  }
+  total: 15,
+  handlers: [
+    {
+      id: "UserController.handleUserCreated",
+      pattern: "user.created",
+      method: "handleUserCreated",
+      class: "UserController",
+      options: { retry: { enabled: true, attempts: 3 } }
+    }
+  ]
 }
 
-// DLQ Reprocessing
-POST /dlq/reprocess
+// DLQ operations - reprocess specific topic
+POST /kafka/dlq/reprocess
 Body: {
-  "handlerId": "OrderService.handleOrderCreated",
-  "batchSize": 50,
-  "timeoutMs": 30000
+  topic: "order.created",      // Required: topic to reprocess
+  batchSize: 100,              // Optional
+  timeoutMs: 30000,            // Optional
+  stopOnError: false           // Optional
 }
+Response: {
+  success: true,
+  message: "DLQ reprocessing started for topic: order.created"
+}
+
+POST /kafka/dlq/stop
+Response: {
+  success: true,
+  message: "DLQ reprocessing stopped"
+}
+
+// Reset metrics
+POST /kafka/metrics/reset?component=all
+```
+
+### Kubernetes Integration
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /kafka/health/live
+    port: 3000
+readinessProbe:
+  httpGet:
+    path: /kafka/health/ready
+    port: 3000
 ```
 
 ### Prometheus Integration
