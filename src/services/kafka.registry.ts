@@ -6,6 +6,7 @@ import { EventHandlerMetadata } from '../interfaces/kafka.interfaces';
 
 export interface RegisteredHandler {
   instance: any;
+  method: Function;
   methodName: string;
   pattern: string;
   metadata: EventHandlerMetadata;
@@ -24,10 +25,10 @@ export class KafkaHandlerRegistry implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.discoverHandlers();
+    // Don't auto-discover - let bootstrap service handle this
   }
 
-  private async discoverHandlers(): Promise<void> {
+  async discoverHandlers(): Promise<void> {
     const instanceWrappers: InstanceWrapper[] = [
       ...this.discoveryService.getControllers(),
       ...this.discoveryService.getProviders(),
@@ -68,6 +69,7 @@ export class KafkaHandlerRegistry implements OnModuleInit {
     const handlerId = this.createHandlerId(instance, methodName);
     const registeredHandler: RegisteredHandler = {
       instance,
+      method: instance[methodName].bind(instance),
       methodName,
       pattern: metadata.pattern,
       metadata,
@@ -114,6 +116,28 @@ export class KafkaHandlerRegistry implements OnModuleInit {
       patterns.add(handler.pattern);
     }
     return Array.from(patterns);
+  }
+
+  /**
+   * Get handler for a specific topic (finds first matching pattern)
+   */
+  getHandlerByTopic(topic: string): RegisteredHandler | undefined {
+    // First try exact match
+    for (const handler of this.handlers.values()) {
+      if (handler.pattern === topic) {
+        return handler;
+      }
+    }
+
+    // Could add pattern matching here for wildcards if needed
+    return undefined;
+  }
+
+  /**
+   * Get the total number of registered handlers
+   */
+  getHandlerCount(): number {
+    return this.handlers.size;
   }
 
   /**

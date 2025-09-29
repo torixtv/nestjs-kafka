@@ -1,14 +1,16 @@
-import { Controller, Get, Post, Body, Param, Logger, Injectable } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Logger, Injectable, UseInterceptors } from '@nestjs/common';
 import { EventHandler } from '../../src/decorators/event-handler.decorator';
 import { KafkaProducerService } from '../../src/core/kafka.producer';
 import { KafkaHandlerRegistry } from '../../src/services/kafka.registry';
 import { KafkaRetryService } from '../../src/services/kafka.retry.service';
 import { KafkaDlqService } from '../../src/services/kafka.dlq.service';
+import { RetryInterceptor } from '../../src/interceptors/retry.interceptor';
 import { AppService } from './app.service';
 import { trace } from '@opentelemetry/api';
 
 @Injectable()
 @Controller()
+@UseInterceptors(RetryInterceptor)
 export class AppController {
   private readonly logger = new Logger(AppController.name);
 
@@ -65,6 +67,9 @@ export class AppController {
       baseDelay: 1000,
       maxDelay: 3000,
       backoff: 'linear',
+    },
+    dlq: {
+      enabled: true,
     },
   })
   async handleAlwaysFail(payload: any) {

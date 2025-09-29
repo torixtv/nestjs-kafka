@@ -155,14 +155,13 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
     this.isReprocessing = true;
     this.metrics.reprocessingSessions++;
 
-    const baseGroupId = this.options.consumer?.groupId || 'kafka-service';
-    const { groupId: _, ...consumerOptions } = this.options.consumer || {};
+    // Use client ID as base for DLQ consumer group to avoid conflicts
+    const baseGroupId = this.options.client?.clientId || 'kafka-service';
 
     // Create a fixed consumer group for DLQ reprocessing to avoid proliferation
     const reprocessingGroupId = `${baseGroupId}.dlq.reprocessing`;
     this.reprocessingConsumer = this.kafka.consumer({
       groupId: reprocessingGroupId,
-      ...consumerOptions,
     });
 
     try {
@@ -366,13 +365,9 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Send to retry topic for processing
-      const messageValue = originalMessage.value
-        ? JSON.parse(originalMessage.value.toString())
-        : null;
-
       await this.producer.send(retryTopicName, {
         key: originalMessage.key ? originalMessage.key.toString() : undefined,
-        value: messageValue,
+        value: originalMessage.value, // Value is already a string from DLQ storage
         headers: retryHeaders,
       });
 
@@ -488,7 +483,7 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
   private buildDlqPayload(message: any, error: Error): string {
     const payload = {
       originalMessage: {
-        value: message.value,
+        value: message.value ? message.value.toString() : null, // Convert Buffer to string
         headers: message.headers,
         timestamp: message.timestamp,
         offset: message.offset,

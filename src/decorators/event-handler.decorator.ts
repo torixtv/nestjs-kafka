@@ -1,5 +1,4 @@
 import { SetMetadata, applyDecorators, UseInterceptors } from '@nestjs/common';
-import { EventPattern } from '@nestjs/microservices';
 
 import { EVENT_HANDLER_METADATA } from '../core/kafka.constants';
 import { EventHandlerOptions } from '../interfaces/kafka.interfaces';
@@ -35,13 +34,12 @@ export function EventHandler(
   };
 
   const decorators = [
-    EventPattern(pattern),
     SetMetadata(EVENT_HANDLER_METADATA, handlerMetadata),
   ];
 
   // Auto-apply RetryInterceptor when retry is enabled
   if (handlerMetadata.options.retry.enabled) {
-    decorators.push(UseInterceptors(RetryInterceptor));
+    decorators.push(UseInterceptors(RetryInterceptor) as any);
   }
 
   return applyDecorators(...decorators);

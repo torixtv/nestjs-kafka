@@ -13,6 +13,17 @@ import { KafkaModule } from '../../src/core/kafka.module';
       consumer: {
         groupId: 'kafka-retry-example-group',
       },
+      subscriptions: {
+        topics: [
+          'example.immediate.success',
+          'example.retry.success',
+          'example.always.fail',
+          'example.manual.test',
+          'example.dlq.test',
+          'example.dlq.disabled',
+        ],
+        fromBeginning: true,
+      },
       retry: {
         enabled: true,
         attempts: 3,
@@ -27,7 +38,6 @@ import { KafkaModule } from '../../src/core/kafka.module';
       dlq: {
         enabled: true,
       },
-      requireBroker: false, // Don't fail if Kafka is not available (for development)
     }),
   ],
   controllers: [AppController],

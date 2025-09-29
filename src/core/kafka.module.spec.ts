@@ -22,9 +22,6 @@ describe('KafkaModule', () => {
           clientId: 'test-client',
           brokers: ['localhost:9092'],
         },
-        consumer: {
-          groupId: 'test-group',
-        },
         retry: {
           enabled: true,
           attempts: 5,
@@ -54,7 +51,6 @@ describe('KafkaModule', () => {
 
       expect(moduleOptions.client?.clientId).toBe('custom-client');
       expect(moduleOptions.client?.brokers).toEqual(['custom:9092']);
-      expect(moduleOptions.consumer?.groupId).toBe('kafka-consumer-group'); // default
       expect(moduleOptions.retry?.enabled).toBe(false); // default
     });
   });
@@ -125,9 +121,6 @@ describe('KafkaModule', () => {
             client: {
               clientId: 'test-client',
               brokers: ['localhost:9092'],
-            },
-            consumer: {
-              groupId: 'test-group',
             },
           }),
         ],

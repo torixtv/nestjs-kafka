@@ -1,10 +1,6 @@
 import { ModuleMetadata, Type } from '@nestjs/common';
 import { KafkaConfig, ConsumerConfig, ProducerConfig } from 'kafkajs';
 
-export interface KafkaConsumerRegistration {
-  topics: string[];
-  fromBeginning?: boolean;
-}
 
 export interface KafkaRetryOptions {
   enabled?: boolean;
@@ -35,15 +31,18 @@ export interface KafkaDlqOptions {
   onFailure?: (message: any, error: Error) => Promise<void>;
 }
 
+export interface KafkaConsumerSubscription {
+  topics: string[];
+  fromBeginning?: boolean;
+}
+
 export interface KafkaModuleOptions {
   client?: KafkaConfig;
   consumer?: ConsumerConfig;
   producer?: ProducerConfig;
-  subscriptions?: KafkaConsumerRegistration;
+  subscriptions?: KafkaConsumerSubscription;
   retry?: KafkaRetryOptions;
   dlq?: KafkaDlqOptions;
-  requireBroker?: boolean;
-  serviceName?: string; // Service name for consumer group generation
 }
 
 export interface KafkaModuleOptionsFactory {

@@ -1,6 +1,6 @@
 {
   "name": "@torixtv/nestjs-kafka",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A simplified, reusable NestJS Kafka events package with retry and DLQ support",
   "author": "Torix Team",
   "private": false,

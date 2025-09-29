@@ -6,6 +6,8 @@ export { KafkaProducerService } from './core/kafka.producer';
 export { KafkaDlqService } from './services/kafka.dlq.service';
 export { KafkaRetryService } from './services/kafka.retry.service';
 export { KafkaHandlerRegistry } from './services/kafka.registry';
+export { KafkaConsumerService } from './services/kafka.consumer.service';
+export { KafkaBootstrapService } from './services/kafka.bootstrap.service';
 
 // Interceptor exports
 export { RetryInterceptor } from './interceptors/retry.interceptor';
@@ -21,6 +23,7 @@ export type {
   KafkaModuleOptions,
   KafkaModuleAsyncOptions,
   KafkaModuleOptionsFactory,
+  KafkaConsumerSubscription,
   KafkaRetryOptions,
   KafkaDlqOptions,
   EventHandlerOptions,

@@ -13,6 +13,8 @@ import { RetryInterceptor } from '../interceptors/retry.interceptor';
 import { KafkaHandlerRegistry } from '../services/kafka.registry';
 import { KafkaRetryService } from '../services/kafka.retry.service';
 import { KafkaDlqService } from '../services/kafka.dlq.service';
+import { KafkaConsumerService } from '../services/kafka.consumer.service';
+import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
 
 @Global()
 @Module({
@@ -43,6 +45,8 @@ export class KafkaModule {
       exports: [
         // Core services
         KafkaProducerService,
+        KafkaConsumerService,
+        KafkaBootstrapService,
         RetryInterceptor,
         KafkaHandlerRegistry,
         KafkaRetryService,
@@ -128,6 +132,8 @@ export class KafkaModule {
       KafkaRetryService,
       KafkaDlqService,
       KafkaProducerService,
+      KafkaConsumerService,
+      KafkaBootstrapService,
       RetryInterceptor,
     ];
   }
@@ -144,7 +150,10 @@ export class KafkaModule {
         groupId: 'kafka-consumer-group',
       },
       producer: {},
-      requireBroker: true,
+      subscriptions: {
+        topics: [],
+        fromBeginning: false,
+      },
       retry: {
         enabled: false,
         attempts: 3,
@@ -182,12 +191,17 @@ export class KafkaModule {
       ? { ...defaults.producer, ...userOptions.producer }
       : defaults.producer;
 
+    const mergedSubscriptions = userOptions.subscriptions
+      ? { ...defaults.subscriptions, ...userOptions.subscriptions }
+      : defaults.subscriptions;
+
     return {
       ...defaults,
       ...userOptions,
       client: mergedClient,
       consumer: mergedConsumer,
       producer: mergedProducer,
+      subscriptions: mergedSubscriptions,
       retry: userOptions.retry
         ? { ...defaults.retry, ...userOptions.retry }
         : defaults.retry,

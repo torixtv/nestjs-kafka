@@ -85,8 +85,8 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     this.admin = this.kafka.admin();
     this.retryTopicName = this.buildRetryTopicName();
 
-    const baseGroupId = this.options.consumer?.groupId || 'kafka-service';
-    const { groupId, ...consumerOptions } = this.options.consumer || {};
+    // Use client ID as base for retry consumer group to avoid conflicts
+    const baseGroupId = this.options.client?.clientId || 'kafka-service';
 
     // Configure consumer with polling intervals for better retry handling
     this.consumer = this.kafka.consumer({
@@ -94,19 +94,13 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
       sessionTimeout: 30000, // 30 seconds
       heartbeatInterval: 3000, // 3 seconds heartbeat
       maxWaitTimeInMs: 2000, // Wait up to 2 seconds for new messages before returning
-      ...consumerOptions,
     });
   }
 
   async onModuleInit(): Promise<void> {
+    // Only ensure topic exists - don't start consumer here
+    // Bootstrap service will handle starting the consumer
     await this.ensureRetryTopicExists();
-
-    if (this.options.retry?.enabled) {
-      this.logger.log('Retry is enabled, starting retry consumer...');
-      await this.startRetryConsumer();
-    } else {
-      this.logger.log('Retry is disabled, retry service will remain inactive');
-    }
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -169,7 +163,7 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async startRetryConsumer(): Promise<void> {
+  async startRetryConsumer(): Promise<void> {
     try {
       this.logger.log(
         `Starting retry consumer for topic: ${this.retryTopicName}`,
@@ -324,9 +318,18 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
     headers: RetryMessageHeaders,
   ): Promise<void> {
     try {
-      const payload = message.value
-        ? JSON.parse(message.value.toString())
-        : null;
+      let payload;
+      if (message.value) {
+        if (Buffer.isBuffer(message.value)) {
+          payload = JSON.parse(message.value.toString());
+        } else if (typeof message.value === 'string') {
+          payload = JSON.parse(message.value);
+        } else {
+          payload = message.value;
+        }
+      } else {
+        payload = null;
+      }
       await this.handlerRegistry.executeHandler(handler.handlerId, payload);
 
       this.logger.debug(

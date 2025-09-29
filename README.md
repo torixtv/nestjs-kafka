@@ -222,6 +222,94 @@ sequenceDiagram
     BS->>App: Bootstrap Complete
 ```
 
+## 🏗️ Architecture
+
+This package provides a **complete Kafka solution** with a **single Kafka instance** that handles all operations: consumption, production, retry, and DLQ management. No need for NestJS microservices configuration.
+
+### How It Works
+
+1. **Single Kafka Instance**: One KafkaJS client handles all operations
+2. **KafkaModule**: Manages complete Kafka lifecycle including consumption
+3. **@EventHandler Decorator**: Registers handlers for topic message processing
+4. **Bootstrap Service**: Coordinates initialization sequence
+
+### Architecture Components
+
+| Component | Responsibility |
+|-----------|----------------|
+| **KafkaModule** | Single source of Kafka configuration and management |
+| **KafkaConsumerService** | Handles topic subscriptions and message consumption |
+| **KafkaProducerService** | Handles message publishing and retry/DLQ sending |
+| **KafkaRetryService** | Manages retry topics and delayed processing |
+| **KafkaDlqService** | Manages dead letter queue topics and reprocessing |
+| **KafkaBootstrapService** | Coordinates initialization order |
+
+### Key Benefits
+
+- **True Single Instance**: One Kafka client for all operations
+- **No Microservice Setup**: No need for `app.connectMicroservice()`
+- **Unified Configuration**: All Kafka settings in one place
+- **Simplified Architecture**: Module handles everything internally
+- **Zero Configuration Conflicts**: No duplicate client/consumer settings
+
+### Example Setup
+
+```typescript
+// app.module.ts - Complete Kafka configuration
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      client: {
+        clientId: 'my-service',
+        brokers: ['localhost:9092']
+      },
+      consumer: {
+        groupId: 'my-service-group'
+      },
+      subscriptions: {
+        topics: ['user.created', 'order.processed'],
+        fromBeginning: false
+      },
+      retry: { enabled: true, attempts: 3 },
+      dlq: { enabled: true }
+    })
+  ],
+  controllers: [MyController],
+})
+export class AppModule {}
+
+// main.ts - No microservice setup needed!
+const app = await NestFactory.create(AppModule);
+await app.listen(3000); // That's it!
+```
+
+### Migration from Previous Version
+
+If you were using the dual-instance architecture:
+
+**Before:**
+```typescript
+// main.ts
+app.connectMicroservice({ transport: Transport.KAFKA, ... });
+
+// app.module.ts
+KafkaModule.forRoot({ client: ..., retry: ... }) // Producer only
+```
+
+**After:**
+```typescript
+// main.ts - Remove connectMicroservice!
+await app.listen(3000);
+
+// app.module.ts - Add subscriptions
+KafkaModule.forRoot({
+  client: ...,
+  consumer: ...,
+  subscriptions: { topics: [...] },
+  retry: ...
+})
+```
+
 ## ⚙️ Configuration
 
 ### Configuration Interface
@@ -242,6 +330,17 @@ export interface KafkaModuleOptions {
     groupId: string;
     sessionTimeout?: number;
     heartbeatInterval?: number;
+    // ... other KafkaJS consumer options
+  };
+  producer?: {
+    // KafkaJS producer configuration options
+    maxInFlightRequests?: number;
+    idempotent?: boolean;
+    transactionTimeout?: number;
+  };
+  subscriptions: {
+    topics: string[];
+    fromBeginning?: boolean;
   };
   retry?: {
     enabled: boolean;
@@ -260,7 +359,6 @@ export interface KafkaModuleOptions {
     topicReplicationFactor?: number;
     topicRetentionMs?: number;
   };
-  requireBroker?: boolean;
 }
 ```
 
@@ -281,6 +379,10 @@ import { ConfigService } from '@nestjs/config';
         consumer: {
           groupId: configService.get<string>('KAFKA_CONSUMER_GROUP'),
         },
+        subscriptions: {
+          topics: configService.get<string>('KAFKA_TOPICS').split(','),
+          fromBeginning: configService.get<boolean>('KAFKA_FROM_BEGINNING', false),
+        },
         retry: {
           enabled: configService.get<boolean>('KAFKA_RETRY_ENABLED', true),
           attempts: configService.get<number>('KAFKA_RETRY_ATTEMPTS', 3),
@@ -291,7 +393,6 @@ import { ConfigService } from '@nestjs/config';
         dlq: {
           enabled: configService.get<boolean>('KAFKA_DLQ_ENABLED', true),
         },
-        requireBroker: configService.get<boolean>('KAFKA_REQUIRE_BROKER', true),
       }),
       inject: [ConfigService],
     }),
@@ -1189,10 +1290,8 @@ await dlqService.reprocessMessages({
 
 **Solution:**
 ```typescript
-// For development
-KafkaModule.forRoot({
-  requireBroker: false, // Don't fail if Kafka unavailable
-})
+// For development - make sure your Kafka brokers are accessible
+// The module will throw errors if it cannot connect to Kafka during operations
 
 // Check broker connectivity
 npm run kafka:topics # List topics to verify connection
