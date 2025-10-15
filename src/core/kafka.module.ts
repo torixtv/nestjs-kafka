@@ -177,14 +177,14 @@ export class KafkaModule {
         topicPartitions: 3,
         topicReplicationFactor: 1,
         topicRetentionMs: 24 * 60 * 60 * 1000, // 24 hours
-        topicSegmentMs: 60 * 60 * 1000, // 1 hour
+        // Don't set topicSegmentMs default - let Kafka use its default
       },
       dlq: {
         enabled: false,
         topicPartitions: 3,
         topicReplicationFactor: 1,
         topicRetentionMs: 7 * 24 * 60 * 60 * 1000, // 7 days
-        topicSegmentMs: 24 * 60 * 60 * 1000, // 24 hours
+        // Don't set topicSegmentMs default - let Kafka use its default
         reprocessingOptions: {
           batchSize: 100,
           timeoutMs: 30000,
