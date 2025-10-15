@@ -56,5 +56,12 @@ export {
   setSpanError,
 } from './utils/tracing.utils';
 
+// Configuration utilities
+export {
+  readSaslConfigFromEnv,
+  applyConfigurationSmartDefaults,
+  mergeWithEnvironmentConfig,
+} from './utils/config.utils';
+
 // Monitoring module exports (optional)
 export * from './monitoring';

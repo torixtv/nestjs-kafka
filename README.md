@@ -401,6 +401,122 @@ import { ConfigService } from '@nestjs/config';
 export class AppModule {}
 ```
 
+### Cloud Kafka Configuration (Confluent, Redpanda, AWS MSK)
+
+The package provides **automatic SASL + SSL configuration** for cloud Kafka providers with zero boilerplate.
+
+#### Simple Configuration (Recommended)
+
+Set environment variables and the package handles the rest:
+
+```bash
+# .env
+KAFKA_BROKERS=pkc-xxxxx.us-east-1.aws.confluent.cloud:9092
+KAFKA_SASL_MECHANISM=plain  # or scram-sha-256, scram-sha-512
+KAFKA_SASL_USERNAME=your-api-key
+KAFKA_SASL_PASSWORD=your-api-secret
+# KAFKA_SSL_ENABLED is optional - automatically enabled when SASL is configured
+```
+
+```typescript
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      client: {
+        brokers: process.env.KAFKA_BROKERS.split(','),
+        // SASL and SSL are automatically configured from environment variables
+      },
+      consumer: {
+        groupId: 'my-consumer-group',
+      },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+**That's it!** The package automatically:
+- ✅ Reads SASL credentials from `KAFKA_SASL_*` environment variables
+- ✅ Enables SSL when SASL is configured (unless explicitly disabled)
+- ✅ Normalizes SASL mechanism to lowercase
+- ✅ Allows explicit overrides when needed
+
+#### Supported Cloud Providers
+
+**Confluent Cloud:**
+```bash
+KAFKA_BROKERS=pkc-xxxxx.us-east-1.aws.confluent.cloud:9092
+KAFKA_SASL_MECHANISM=plain
+KAFKA_SASL_USERNAME=<API_KEY>
+KAFKA_SASL_PASSWORD=<API_SECRET>
+```
+
+**Redpanda Cloud:**
+```bash
+KAFKA_BROKERS=seed-xxxxx.redpanda.cloud:9092
+KAFKA_SASL_MECHANISM=scram-sha-256
+KAFKA_SASL_USERNAME=<USERNAME>
+KAFKA_SASL_PASSWORD=<PASSWORD>
+```
+
+**AWS MSK (SASL/SCRAM):**
+```bash
+KAFKA_BROKERS=b-1.mycluster.xxx.kafka.amazonaws.com:9092
+KAFKA_SASL_MECHANISM=scram-sha-512
+KAFKA_SASL_USERNAME=<USERNAME>
+KAFKA_SASL_PASSWORD=<PASSWORD>
+```
+
+#### Explicit Configuration (Alternative)
+
+If you prefer explicit configuration or need special settings:
+
+```typescript
+@Module({
+  imports: [
+    KafkaModule.forRootAsync({
+      useFactory: (config: ConfigService) => ({
+        client: {
+          brokers: config.get('KAFKA_BROKERS').split(','),
+          ssl: true,  // Explicitly enable SSL
+          sasl: {
+            mechanism: 'scram-sha-256',
+            username: config.get('KAFKA_SASL_USERNAME'),
+            password: config.get('KAFKA_SASL_PASSWORD'),
+          },
+        },
+        consumer: {
+          groupId: 'my-consumer-group',
+        },
+      }),
+      inject: [ConfigService],
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+#### Configuration Precedence
+
+The package follows this precedence order:
+1. **Explicit config** - Values you provide in `KafkaModule.forRoot()` always win
+2. **Environment variables** - Automatic fallback using `KAFKA_SASL_*` and `KAFKA_SSL_ENABLED`
+3. **Smart defaults** - SSL automatically enabled when SASL is configured
+
+#### Disabling Smart Defaults
+
+To use SASL **without** SSL (not recommended for production):
+
+```typescript
+KafkaModule.forRoot({
+  client: {
+    brokers: ['localhost:9092'],
+    ssl: false,  // Explicit override prevents auto-enabling SSL
+    // SASL config from env will still be applied
+  },
+})
+```
+
 ### Microservice Setup
 
 ```typescript

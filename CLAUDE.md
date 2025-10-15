@@ -114,6 +114,27 @@ await bootstrapService.forceInitialization();
 2. **Handler-specific overrides** in `@EventHandler(pattern, { retry: {...} })`
 3. **Runtime headers** from previous retry attempts
 
+### Cloud Kafka Configuration (Automatic SASL + SSL)
+
+The package automatically configures SASL and SSL for cloud Kafka providers using environment variables:
+
+```bash
+# Environment variables
+KAFKA_SASL_MECHANISM=plain          # or scram-sha-256, scram-sha-512
+KAFKA_SASL_USERNAME=your-username
+KAFKA_SASL_PASSWORD=your-password
+KAFKA_SSL_ENABLED=true              # Optional - auto-enabled when SASL is configured
+```
+
+**Configuration Precedence**:
+1. Explicit config in `KafkaModule.forRoot()` (highest priority)
+2. Environment variables (`KAFKA_SASL_*`)
+3. Smart defaults (SSL auto-enabled with SASL)
+
+**Smart Defaults**: When SASL credentials are configured (either explicitly or via environment), SSL is automatically enabled unless explicitly set to `false`.
+
+**Implementation**: See [config.utils.ts](src/utils/config.utils.ts) for the configuration merge logic.
+
 ### Testing Strategy
 
 **Unit Tests**: Test individual services/utilities in isolation

@@ -16,6 +16,7 @@ import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaConsumerService } from '../services/kafka.consumer.service';
 import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
 import { KafkaMonitoringController } from '../monitoring/kafka-monitoring.controller';
+import { mergeWithEnvironmentConfig } from '../utils/config.utils';
 
 @Global()
 @Module({
@@ -138,14 +139,13 @@ export class KafkaModule {
             throw new Error('Kafka client configuration is required');
           }
 
-          // Normalize SASL mechanism to lowercase to prevent configuration errors
-          const clientConfig = { ...options.client };
-          if (clientConfig.sasl?.mechanism) {
-            clientConfig.sasl = {
-              ...clientConfig.sasl,
-              mechanism: clientConfig.sasl.mechanism.toLowerCase() as any,
-            };
-          }
+          // Merge with environment config and apply smart defaults
+          // This automatically:
+          // - Reads SASL config from KAFKA_SASL_* env vars
+          // - Reads SSL config from KAFKA_SSL_ENABLED env var
+          // - Enables SSL automatically when SASL is configured
+          // - Normalizes SASL mechanism to lowercase
+          const clientConfig = mergeWithEnvironmentConfig(options.client);
 
           return new Kafka(clientConfig);
         },
