@@ -128,23 +128,34 @@ export class KafkaRetryService implements OnModuleInit, OnModuleDestroy {
         topic: this.retryTopicName,
         numPartitions: this.options.retry?.topicPartitions || 3,
         replicationFactor: this.options.retry?.topicReplicationFactor || 1,
-        configEntries: [
-          {
-            name: 'cleanup.policy',
-            value: 'delete',
-          },
-          {
-            name: 'retention.ms',
-            value: String(
-              this.options.retry?.topicRetentionMs || 24 * 60 * 60 * 1000,
-            ),
-          },
-          {
-            name: 'segment.ms',
-            value: String(this.options.retry?.topicSegmentMs || 60 * 60 * 1000),
-          },
-        ],
       };
+
+      // Only add configEntries if explicitly configured
+      // This allows managed Kafka services (like Redpanda Cloud) to use their defaults
+      const configEntries: { name: string; value: string }[] = [];
+
+      if (this.options.retry?.topicRetentionMs !== undefined) {
+        configEntries.push({
+          name: 'retention.ms',
+          value: String(this.options.retry.topicRetentionMs),
+        });
+      }
+
+      if (this.options.retry?.topicSegmentMs !== undefined) {
+        configEntries.push({
+          name: 'segment.ms',
+          value: String(this.options.retry.topicSegmentMs),
+        });
+      }
+
+      // Always set cleanup.policy if we have any config entries
+      if (configEntries.length > 0) {
+        configEntries.unshift({
+          name: 'cleanup.policy',
+          value: 'delete',
+        });
+        topicConfig.configEntries = configEntries;
+      }
 
       await this.admin.createTopics({
         topics: [topicConfig],

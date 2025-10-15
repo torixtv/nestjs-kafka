@@ -103,25 +103,34 @@ export class KafkaDlqService implements OnModuleInit, OnModuleDestroy {
         topic: this.dlqTopicName,
         numPartitions: this.options.dlq?.topicPartitions || 3,
         replicationFactor: this.options.dlq?.topicReplicationFactor || 1,
-        configEntries: [
-          {
-            name: 'cleanup.policy',
-            value: 'delete',
-          },
-          {
-            name: 'retention.ms',
-            value: String(
-              this.options.dlq?.topicRetentionMs || 7 * 24 * 60 * 60 * 1000, // 7 days
-            ),
-          },
-          {
-            name: 'segment.ms',
-            value: String(
-              this.options.dlq?.topicSegmentMs || 24 * 60 * 60 * 1000, // 24 hours
-            ),
-          },
-        ],
       };
+
+      // Only add configEntries if explicitly configured
+      // This allows managed Kafka services (like Redpanda Cloud) to use their defaults
+      const configEntries: { name: string; value: string }[] = [];
+
+      if (this.options.dlq?.topicRetentionMs !== undefined) {
+        configEntries.push({
+          name: 'retention.ms',
+          value: String(this.options.dlq.topicRetentionMs),
+        });
+      }
+
+      if (this.options.dlq?.topicSegmentMs !== undefined) {
+        configEntries.push({
+          name: 'segment.ms',
+          value: String(this.options.dlq.topicSegmentMs),
+        });
+      }
+
+      // Always set cleanup.policy if we have any config entries
+      if (configEntries.length > 0) {
+        configEntries.unshift({
+          name: 'cleanup.policy',
+          value: 'delete',
+        });
+        topicConfig.configEntries = configEntries;
+      }
 
       await this.admin.createTopics({
         topics: [topicConfig],
