@@ -137,7 +137,17 @@ export class KafkaModule {
           if (!options.client) {
             throw new Error('Kafka client configuration is required');
           }
-          return new Kafka(options.client);
+
+          // Normalize SASL mechanism to lowercase to prevent configuration errors
+          const clientConfig = { ...options.client };
+          if (clientConfig.sasl?.mechanism) {
+            clientConfig.sasl = {
+              ...clientConfig.sasl,
+              mechanism: clientConfig.sasl.mechanism.toLowerCase() as any,
+            };
+          }
+
+          return new Kafka(clientConfig);
         },
       },
       Reflector,
@@ -213,6 +223,15 @@ export class KafkaModule {
       ? { ...defaults.subscriptions, ...userOptions.subscriptions }
       : defaults.subscriptions;
 
+    // Normalize retry backoff to lowercase
+    const mergedRetry = userOptions.retry
+      ? { ...defaults.retry, ...userOptions.retry }
+      : defaults.retry;
+
+    if (mergedRetry?.backoff) {
+      mergedRetry.backoff = mergedRetry.backoff.toLowerCase() as 'exponential' | 'linear';
+    }
+
     return {
       ...defaults,
       ...userOptions,
@@ -220,9 +239,7 @@ export class KafkaModule {
       consumer: mergedConsumer,
       producer: mergedProducer,
       subscriptions: mergedSubscriptions,
-      retry: userOptions.retry
-        ? { ...defaults.retry, ...userOptions.retry }
-        : defaults.retry,
+      retry: mergedRetry,
       dlq: userOptions.dlq
         ? { ...defaults.dlq, ...userOptions.dlq }
         : defaults.dlq,
