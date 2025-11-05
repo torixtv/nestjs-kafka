@@ -16,6 +16,7 @@ import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaConsumerService } from '../services/kafka.consumer.service';
 import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
 import { KafkaMonitoringController } from '../monitoring/kafka-monitoring.controller';
+import { KafkaHealthIndicator } from '../health/kafka-health.indicator';
 import { mergeWithEnvironmentConfig } from '../utils/config.utils';
 
 @Global()
@@ -66,6 +67,9 @@ export class KafkaModule {
         KafkaHandlerRegistry,
         KafkaRetryService,
         KafkaDlqService,
+        // Health indicator
+        KafkaHealthIndicator,
+        // Options and instance
         KAFKA_MODULE_OPTIONS,
         KAFKAJS_INSTANCE,
       ],
@@ -159,6 +163,8 @@ export class KafkaModule {
       KafkaConsumerService,
       KafkaBootstrapService,
       RetryInterceptor,
+      // Health indicator
+      KafkaHealthIndicator,
     ];
   }
 

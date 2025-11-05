@@ -1,10 +1,15 @@
 import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { HealthController } from './health.controller';
 import { KafkaModule } from '../../src/core/kafka.module';
 
 @Module({
   imports: [
+    // Terminus module for health checks
+    TerminusModule,
+    // Kafka module with retry and DLQ support
     KafkaModule.forRoot({
       client: {
         clientId: 'kafka-retry-example',
@@ -42,7 +47,11 @@ import { KafkaModule } from '../../src/core/kafka.module';
       // monitoring: { enabled: true, path: 'kafka' },
     }),
   ],
-  controllers: [AppController], // KafkaMonitoringController is auto-registered by KafkaModule
+  controllers: [
+    AppController,
+    HealthController, // Terminus-based health checks (GET /health, /health/live, /health/ready)
+    // Note: KafkaMonitoringController is auto-registered by KafkaModule (GET /kafka/*)
+  ],
   providers: [AppService],
 })
 export class AppModule {}

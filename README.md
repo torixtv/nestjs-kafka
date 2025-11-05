@@ -1289,26 +1289,239 @@ export class MetricsService {
 }
 ```
 
-### Health Indicators
+### Health Indicators with @nestjs/terminus
+
+The package provides a production-ready `KafkaHealthIndicator` for integration with `@nestjs/terminus`, perfect for Kubernetes readiness and liveness probes.
+
+#### Installation
+
+```bash
+npm install @nestjs/terminus
+```
+
+#### Health Check Criteria
+
+The health indicator uses **intelligent health checks** that distinguish between critical and non-critical failures:
+
+**✅ Service is HEALTHY when:**
+- Kafka broker is reachable (producer OR consumer connected)
+- Bootstrap initialization is complete
+- Handlers are registered
+
+**❌ Service is UNHEALTHY when:**
+- Kafka broker is unreachable (both producer AND consumer disconnected)
+- Bootstrap initialization failed or incomplete
+
+**ℹ️ Non-Critical (does NOT affect health):**
+- Consumer has no partitions assigned (normal when scaling beyond partition count)
+- Retry consumer is not running
+- DLQ operations are failing
+
+This design ensures your service remains healthy even when scaled beyond the number of Kafka topic partitions.
+
+#### Basic Setup
 
 ```typescript
-import { HealthIndicator, HealthIndicatorResult } from '@nestjs/terminus';
+import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
+import { KafkaModule, KafkaHealthIndicator } from '@torix/nestjs-kafka';
+import { HealthController } from './health.controller';
+
+@Module({
+  imports: [
+    KafkaModule.forRoot({
+      client: { brokers: ['localhost:9092'] },
+      consumer: { groupId: 'my-service' },
+    }),
+    TerminusModule, // Add Terminus module
+  ],
+  controllers: [HealthController],
+})
+export class AppModule {}
+```
+
+#### Health Controller Example
+
+```typescript
+import { Controller, Get } from '@nestjs/common';
+import {
+  HealthCheck,
+  HealthCheckService,
+  HealthCheckResult,
+} from '@nestjs/terminus';
+import { KafkaHealthIndicator } from '@torix/nestjs-kafka';
+
+@Controller('health')
+export class HealthController {
+  constructor(
+    private health: HealthCheckService,
+    private kafkaHealth: KafkaHealthIndicator,
+  ) {}
+
+  @Get()
+  @HealthCheck()
+  check(): Promise<HealthCheckResult> {
+    return this.health.check([
+      () => this.kafkaHealth.isHealthy('kafka'),
+    ]);
+  }
+}
+```
+
+#### Standalone Usage (without @nestjs/terminus)
+
+You can also use the health indicator directly without Terminus:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { KafkaHealthIndicator } from '@torix/nestjs-kafka';
 
 @Injectable()
-export class KafkaHealthIndicator extends HealthIndicator {
-  constructor(private readonly kafkaService: KafkaProducerService) {
-    super();
-  }
+export class MyService {
+  constructor(private kafkaHealth: KafkaHealthIndicator) {}
 
-  async isHealthy(key: string): Promise<HealthIndicatorResult> {
-    try {
-      await this.kafkaService.send('health-check', { timestamp: Date.now() });
-      return this.getStatus(key, true);
-    } catch (error) {
-      return this.getStatus(key, false, { error: error.message });
+  async checkKafkaStatus() {
+    const result = await this.kafkaHealth.checkHealth();
+
+    if (result.status === 'healthy') {
+      console.log('✅ Kafka is healthy');
+    } else {
+      console.log('❌ Kafka is unhealthy');
+      console.log('Broker:', result.components.broker);
+      console.log('Bootstrap:', result.components.bootstrap);
+    }
+
+    return result;
+  }
+}
+```
+
+#### Health Check Response
+
+```typescript
+{
+  "status": "healthy",
+  "timestamp": "2025-11-05T22:30:00.000Z",
+  "components": {
+    "broker": {
+      "healthy": true,
+      "message": "Broker connection established",
+      "details": {
+        "producerReady": true,
+        "consumerConnected": true
+      }
+    },
+    "bootstrap": {
+      "healthy": true,
+      "message": "Bootstrap initialization complete"
+    },
+    "producer": {
+      "healthy": true,
+      "message": "Producer connected"
+    },
+    "consumer": {
+      "healthy": true,
+      "message": "Consumer connected (may be waiting for partition assignment)",
+      "details": {
+        "note": "No partitions assigned is normal when consumer group size > partition count"
+      }
+    },
+    "handlers": {
+      "healthy": true,
+      "message": "5 handler(s) registered",
+      "details": {
+        "count": 5
+      }
+    },
+    "retry": {
+      "healthy": true,
+      "message": "Retry consumer running",
+      "details": {
+        "running": true,
+        "note": "Retry consumer status does not affect overall health"
+      }
     }
   }
 }
+```
+
+#### Kubernetes Deployment Example
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-kafka-service
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: app
+        image: my-kafka-service:latest
+        ports:
+        - containerPort: 3000
+        # Liveness probe - restart if unhealthy
+        livenessProbe:
+          httpGet:
+            path: /kafka/health/live
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Readiness probe - remove from load balancer if not ready
+        readinessProbe:
+          httpGet:
+            path: /kafka/health/ready
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+```
+
+#### Scaling Beyond Partition Count
+
+When you scale your service beyond the number of Kafka topic partitions, some consumer instances will not receive partitions. **This is normal and expected** - the health indicator correctly marks the service as healthy in this scenario:
+
+```typescript
+// Scenario: 10 topic partitions, 15 consumer instances
+// - 10 consumers get partitions (actively processing)
+// - 5 consumers wait idle (no partitions assigned)
+// - All 15 instances report HEALTHY ✅
+
+{
+  "status": "healthy",  // ✅ Still healthy!
+  "components": {
+    "broker": { "healthy": true },
+    "consumer": {
+      "healthy": true,
+      "message": "Consumer connected (may be waiting for partition assignment)"
+    }
+  }
+}
+```
+
+The idle consumers are ready to take over if an active consumer fails (automatic rebalancing).
+
+#### Alternative: Using KafkaHealthModule
+
+For simpler setup, you can import the `KafkaHealthModule`:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { TerminusModule } from '@nestjs/terminus';
+import { KafkaModule, KafkaHealthModule } from '@torix/nestjs-kafka';
+
+@Module({
+  imports: [
+    KafkaModule.forRoot({ /* config */ }),
+    KafkaHealthModule,  // Automatically provides KafkaHealthIndicator
+    TerminusModule,
+  ],
+})
+export class AppModule {}
 ```
 
 ## 🧪 Testing

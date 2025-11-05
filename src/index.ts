@@ -63,5 +63,8 @@ export {
   mergeWithEnvironmentConfig,
 } from './utils/config.utils';
 
+// Health module exports (optional - for @nestjs/terminus integration)
+export * from './health';
+
 // Monitoring module exports (optional)
 export * from './monitoring';

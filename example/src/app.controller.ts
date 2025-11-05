@@ -161,26 +161,58 @@ export class AppController {
       message: 'Kafka Retry Example Application',
       description: 'NestJS application demonstrating Kafka retry mechanism with DLQ support and full lifecycle support',
       endpoints: {
-        health: '/health',
+        // Terminus-based health checks (Kubernetes-ready)
+        health: '/health (comprehensive health check)',
+        healthLive: '/health/live (liveness probe)',
+        healthReady: '/health/ready (readiness probe)',
+        // Custom monitoring endpoints
+        status: '/status (detailed application metrics)',
         metrics: '/metrics',
         debug: '/debug',
         messages: '/messages',
         stats: '/stats',
+        // Testing endpoints
         send: 'POST /test/send',
         trace: 'POST /test/trace',
         reset: 'POST /reset',
+        // DLQ operations
         dlq: {
           status: '/dlq/status',
           metrics: '/dlq/metrics',
           reprocess: 'POST /dlq/reprocess',
           stop: 'POST /dlq/stop',
         },
+        // Kafka monitoring (auto-registered by KafkaModule)
+        kafka: {
+          health: '/kafka/health',
+          ready: '/kafka/health/ready',
+          live: '/kafka/health/live',
+          metrics: '/kafka/metrics',
+          handlers: '/kafka/handlers',
+        },
       },
     };
   }
 
-  @Get('health')
-  getHealth() {
+  /**
+   * Custom status endpoint with detailed application metrics
+   * GET /status
+   *
+   * This is a custom endpoint that provides detailed metrics about the application.
+   * It's separate from the Terminus-based health checks at /health, /health/live, /health/ready.
+   *
+   * Use this for:
+   * - Detailed application metrics
+   * - Debugging and monitoring
+   * - Custom health information
+   *
+   * Use /health endpoints for:
+   * - Kubernetes liveness/readiness probes
+   * - Standard health check integrations
+   * - Load balancer health checks
+   */
+  @Get('status')
+  getStatus() {
     const retryMetrics = this.retryService.getMetrics();
     const dlqMetrics = this.dlqService.getMetrics();
 

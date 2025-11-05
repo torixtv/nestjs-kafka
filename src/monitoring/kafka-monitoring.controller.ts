@@ -3,6 +3,7 @@ import { KafkaHandlerRegistry } from '../services/kafka.registry';
 import { KafkaRetryService } from '../services/kafka.retry.service';
 import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaProducerService } from '../core/kafka.producer';
+import { KafkaHealthIndicator } from '../health/kafka-health.indicator';
 
 /**
  * Optional monitoring controller for Kafka infrastructure.
@@ -28,24 +29,33 @@ export class KafkaMonitoringController {
     private readonly retryService: KafkaRetryService,
     private readonly dlqService: KafkaDlqService,
     private readonly producerService: KafkaProducerService,
+    private readonly healthIndicator: KafkaHealthIndicator,
   ) {}
 
   /**
-   * Simple health check
+   * Comprehensive health check with detailed component status
    * GET /kafka/health
+   *
+   * Returns detailed health status for all Kafka components.
+   * Uses the same logic as KafkaHealthIndicator for consistency.
+   *
+   * **Health Criteria:**
+   * - ✅ Healthy: Broker reachable AND bootstrap complete
+   * - ❌ Unhealthy: Broker unreachable OR bootstrap incomplete
+   * - ℹ️ Partition assignment issues do NOT affect health status
    */
   @Get('health')
   async getHealth() {
-    const producerReady = await this.producerService.isReady();
+    const healthResult = await this.healthIndicator.checkHealth();
 
     return {
-      status: producerReady ? 'healthy' : 'degraded',
-      timestamp: new Date().toISOString(),
-      components: {
-        producer: { connected: producerReady },
-        retry: { running: this.retryService.isRetryConsumerRunning() },
-        dlq: { reprocessing: this.dlqService.isReprocessingActive() },
-        handlers: { registered: this.handlerRegistry.getHandlerCount() },
+      status: healthResult.status,
+      timestamp: healthResult.timestamp,
+      components: healthResult.components,
+      notes: {
+        partitionAssignment:
+          'Consumer may be waiting for partitions if consumer group size > partition count',
+        retryConsumer: 'Retry consumer status does not affect overall health',
       },
     };
   }
@@ -53,30 +63,52 @@ export class KafkaMonitoringController {
   /**
    * Kubernetes readiness probe
    * GET /kafka/health/ready
+   *
+   * Checks if the service is ready to receive traffic.
+   * Returns HTTP 200 if healthy, suitable for k8s readiness probes.
+   *
+   * **Readiness Criteria:**
+   * - Broker reachable (producer or consumer connected)
+   * - Bootstrap initialization complete
+   *
+   * **Non-Critical:**
+   * - Partition assignment (consumer may be waiting for partitions)
+   * - Retry consumer status
    */
   @Get('health/ready')
   async getReadiness() {
-    const producerReady = await this.producerService.isReady();
-    const handlersRegistered = this.handlerRegistry.getHandlerCount() > 0;
+    const healthResult = await this.healthIndicator.checkHealth();
 
     return {
-      ready: producerReady && handlersRegistered,
+      ready: healthResult.status === 'healthy',
+      timestamp: healthResult.timestamp,
       checks: {
-        producer: producerReady,
-        handlers: handlersRegistered,
+        broker: healthResult.components.broker.healthy,
+        bootstrap: healthResult.components.bootstrap.healthy,
       },
+      note: 'Service is ready even if consumer has no partitions assigned (normal when scaling beyond partition count)',
     };
   }
 
   /**
    * Kubernetes liveness probe
    * GET /kafka/health/live
+   *
+   * Checks if the service is alive and should not be restarted.
+   * This is a lenient check - returns alive as long as the service is running.
+   *
+   * **Liveness Criteria:**
+   * - Service process is running (always returns alive: true)
+   *
+   * This endpoint should almost never fail. It's only for detecting
+   * catastrophic failures like process hangs or deadlocks.
    */
   @Get('health/live')
   getLiveness() {
     return {
       alive: true,
       timestamp: new Date().toISOString(),
+      note: 'Liveness check only fails on catastrophic process failures',
     };
   }
 
