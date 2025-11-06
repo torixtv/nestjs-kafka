@@ -319,6 +319,7 @@ describe('KafkaHealthIndicator', () => {
         null as any,
         null as any,
         null as any,
+        { getComponent: jest.fn() } as any,
       );
 
       // Act
