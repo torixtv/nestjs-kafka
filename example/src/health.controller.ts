@@ -4,7 +4,7 @@ import {
   HealthCheckService,
   HealthCheckResult,
 } from '@nestjs/terminus';
-import { KafkaHealthIndicator } from '../../src/health/kafka-health.indicator';
+import { KafkaHealthIndicator } from '../../src/health';
 
 /**
  * Health check controller using @nestjs/terminus

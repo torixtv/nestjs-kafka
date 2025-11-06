@@ -1,5 +1,6 @@
 import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
 import { DiscoveryModule, Reflector } from '@nestjs/core';
+import { TerminusModule } from '@nestjs/terminus';
 import { Kafka } from 'kafkajs';
 
 import { KAFKA_MODULE_OPTIONS, KAFKAJS_INSTANCE } from './kafka.constants';
@@ -16,18 +17,18 @@ import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaConsumerService } from '../services/kafka.consumer.service';
 import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
 import { KafkaMonitoringController } from '../monitoring/kafka-monitoring.controller';
-import { KafkaHealthIndicator } from '../health/kafka-health.indicator';
 import { mergeWithEnvironmentConfig } from '../utils/config.utils';
+import { KafkaHealthIndicator } from '../health';
 
 @Global()
 @Module({
-  imports: [DiscoveryModule],
+  imports: [DiscoveryModule, TerminusModule],
 })
 export class KafkaModule {
   static forRoot(options: KafkaModuleOptions = {}): DynamicModule {
     const mergedOptions = this.mergeWithDefaults(options);
     const providers = this.createProviders(mergedOptions);
-    const imports = [DiscoveryModule];
+    const imports = [DiscoveryModule, TerminusModule];
     const controllers = this.shouldEnableMonitoring(mergedOptions)
       ? [KafkaMonitoringController]
       : [];
@@ -37,7 +38,7 @@ export class KafkaModule {
   static forRootAsync(options: KafkaModuleAsyncOptions): DynamicModule {
     const asyncProviders = this.createAsyncProviders(options);
     const providers = [...asyncProviders, ...this.createSharedProviders()];
-    const imports = [DiscoveryModule, ...(options.imports || [])];
+    const imports = [DiscoveryModule, TerminusModule, ...(options.imports || [])];
     // Note: For async, we can't determine monitoring status at build time
     // So we always include the controller, but it could be made conditional via injection
     return this.createModule(providers, imports, [KafkaMonitoringController]);
@@ -67,7 +68,6 @@ export class KafkaModule {
         KafkaHandlerRegistry,
         KafkaRetryService,
         KafkaDlqService,
-        // Health indicator
         KafkaHealthIndicator,
         // Options and instance
         KAFKA_MODULE_OPTIONS,
@@ -163,7 +163,6 @@ export class KafkaModule {
       KafkaConsumerService,
       KafkaBootstrapService,
       RetryInterceptor,
-      // Health indicator
       KafkaHealthIndicator,
     ];
   }

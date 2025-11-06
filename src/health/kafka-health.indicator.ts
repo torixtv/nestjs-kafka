@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { HealthIndicatorResult, HealthIndicatorService } from '@nestjs/terminus';
 import { KafkaProducerService } from '../core/kafka.producer';
 import { KafkaConsumerService } from '../services/kafka.consumer.service';
 import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
@@ -83,6 +84,7 @@ export class KafkaHealthIndicator {
     @Optional() private readonly bootstrapService: KafkaBootstrapService,
     @Optional() private readonly handlerRegistry: KafkaHandlerRegistry,
     @Optional() private readonly retryService: KafkaRetryService,
+    private readonly healthIndicatorService: HealthIndicatorService,
   ) {}
 
   /**
@@ -142,16 +144,25 @@ export class KafkaHealthIndicator {
    *   ]);
    * }
    */
-  async isHealthy(key: string): Promise<Record<string, any>> {
-    const healthResult = await this.checkHealth();
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    const check = this.healthIndicatorService.check(key);
 
-    // Return Terminus-compatible result
-    return {
-      [key]: {
-        status: healthResult.status,
-        ...healthResult.components,
-      },
-    };
+    try {
+      const healthResult = await this.checkHealth();
+
+      if (healthResult.status === 'healthy') {
+        // Pass all component details to the up() method
+        return check.up(healthResult.components);
+      } else {
+        // Pass all component details to the down() method
+        return check.down(healthResult.components);
+      }
+    } catch (error) {
+      this.logger.error('Kafka health check failed', error);
+      return check.down({
+        message: error instanceof Error ? error.message : 'Unknown Kafka health check error',
+      });
+    }
   }
 
   /**

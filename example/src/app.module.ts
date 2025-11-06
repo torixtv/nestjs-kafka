@@ -7,9 +7,7 @@ import { KafkaModule } from '../../src/core/kafka.module';
 
 @Module({
   imports: [
-    // Terminus module for health checks
-    TerminusModule,
-    // Kafka module with retry and DLQ support
+    // Kafka module with retry, DLQ, and health indicator support
     KafkaModule.forRoot({
       client: {
         clientId: 'kafka-retry-example',
@@ -46,6 +44,9 @@ import { KafkaModule } from '../../src/core/kafka.module';
       // monitoring is enabled by default - no need to specify
       // monitoring: { enabled: true, path: 'kafka' },
     }),
+    // TerminusModule provides HealthCheckService needed by KafkaHealthIndicator
+    // KafkaHealthIndicator is provided by KafkaModule (which is @Global)
+    TerminusModule,
   ],
   controllers: [
     AppController,
