@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { HealthIndicatorService } from '@nestjs/terminus';
 import { KafkaHealthIndicator } from '../src/health/kafka-health.indicator';
 import { KafkaProducerService } from '../src/core/kafka.producer';
 import { KafkaConsumerService } from '../src/services/kafka.consumer.service';
@@ -36,6 +37,13 @@ describe('KafkaHealthIndicator', () => {
       isRetryConsumerRunning: jest.fn(),
     };
 
+    const mockHealthIndicatorService = {
+      check: jest.fn().mockImplementation((key: string) => ({
+        up: jest.fn((data) => ({ [key]: { status: 'healthy', ...data } })),
+        down: jest.fn((data) => ({ [key]: { status: 'unhealthy', ...data } })),
+      })),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KafkaHealthIndicator,
@@ -58,6 +66,10 @@ describe('KafkaHealthIndicator', () => {
         {
           provide: KafkaRetryService,
           useValue: mockRetryService,
+        },
+        {
+          provide: HealthIndicatorService,
+          useValue: mockHealthIndicatorService,
         },
       ],
     }).compile();

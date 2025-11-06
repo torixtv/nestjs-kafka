@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { Module } from '@nestjs/common';
-import { TerminusModule, HealthIndicatorService } from '@nestjs/terminus';
+import { TerminusModule } from '@nestjs/terminus';
 import { KafkaModule } from './kafka.module';
 import { KafkaProducerService } from './kafka.producer';
 import { RetryInterceptor } from '../interceptors/retry.interceptor';
@@ -9,20 +9,7 @@ import { KafkaModuleOptions } from '../interfaces/kafka.interfaces';
 import { KafkaRetryService } from '../services/kafka.retry.service';
 
 // Mock TerminusModule to avoid dependency resolution issues in tests
-@Module({
-  providers: [
-    {
-      provide: HealthIndicatorService,
-      useValue: {
-        check: jest.fn().mockImplementation((key: string) => ({
-          up: jest.fn((data) => ({ [key]: { status: 'healthy', ...data } })),
-          down: jest.fn((data) => ({ [key]: { status: 'unhealthy', ...data } })),
-        })),
-      },
-    },
-  ],
-  exports: [HealthIndicatorService],
-})
+@Module({})
 class MockTerminusModule {}
 
 describe('KafkaModule', () => {
@@ -65,7 +52,7 @@ describe('KafkaModule', () => {
         imports: [KafkaModule.forRoot(options)],
       })
         .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
+        .useClass(MockTerminusModule)
         .compile();
 
       const moduleOptions =
@@ -146,10 +133,7 @@ describe('KafkaModule', () => {
             },
           }),
         ],
-      })
-        .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
-        .compile();
+      }).compile();
     });
 
     afterEach(async () => {
@@ -188,10 +172,7 @@ describe('KafkaModule', () => {
     it('should handle undefined client config', async () => {
       const module = await Test.createTestingModule({
         imports: [KafkaModule.forRoot({})],
-      })
-        .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
-        .compile();
+      }).compile();
 
       const options = module.get<KafkaModuleOptions>(KAFKA_MODULE_OPTIONS);
       expect(options.client?.clientId).toBe('kafka-client');
@@ -211,10 +192,7 @@ describe('KafkaModule', () => {
             },
           }),
         ],
-      })
-        .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
-        .compile();
+      }).compile();
 
       const options = module.get<KafkaModuleOptions>(KAFKA_MODULE_OPTIONS);
       expect(options.client?.clientId).toBe('partial-client');
@@ -238,10 +216,7 @@ describe('KafkaModule', () => {
             },
           }),
         ],
-      })
-        .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
-        .compile();
+      }).compile();
 
       const options = module.get<KafkaModuleOptions>(KAFKA_MODULE_OPTIONS);
       expect(options.retry?.enabled).toBe(true);
@@ -269,10 +244,7 @@ describe('KafkaModule', () => {
             },
           }),
         ],
-      })
-        .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
-        .compile();
+      }).compile();
 
       // Initialize the application to trigger lifecycle hooks
       const app = module.createNestApplication();
@@ -298,10 +270,7 @@ describe('KafkaModule', () => {
             },
           }),
         ],
-      })
-        .overrideModule(TerminusModule)
-        .useModule(MockTerminusModule)
-        .compile();
+      }).compile();
 
       // Initialize the application to trigger lifecycle hooks
       const app = module.createNestApplication();
