@@ -181,6 +181,9 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
     if (typeof value === 'string') {
       return value;
     }
+    if (Buffer.isBuffer(value)) {
+      return value.toString();
+    }
     return JSON.stringify(value);
   }
 
