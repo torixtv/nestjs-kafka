@@ -6,7 +6,15 @@ export { KafkaProducerService } from './core/kafka.producer';
 export { KafkaDlqService } from './services/kafka.dlq.service';
 export { KafkaRetryService } from './services/kafka.retry.service';
 export { KafkaHandlerRegistry } from './services/kafka.registry';
-export { KafkaConsumerService } from './services/kafka.consumer.service';
+export {
+  KafkaConsumerService,
+  ConsumerState,
+} from './services/kafka.consumer.service';
+export type {
+  PartitionAssignment,
+  ConsumerHealthState,
+  ConsumerGroupInfo,
+} from './services/kafka.consumer.service';
 export { KafkaBootstrapService } from './services/kafka.bootstrap.service';
 
 // Interceptor exports
@@ -27,6 +35,7 @@ export type {
   KafkaRetryOptions,
   KafkaDlqOptions,
   KafkaMonitoringOptions,
+  KafkaHealthOptions,
   EventHandlerOptions,
 } from './interfaces/kafka.interfaces';
 
