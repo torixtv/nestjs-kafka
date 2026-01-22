@@ -18,11 +18,67 @@ import { KafkaRetryService } from './kafka.retry.service';
 import { KafkaDlqService } from './kafka.dlq.service';
 import { KafkaProducerService } from '../core/kafka.producer';
 
+/**
+ * Consumer state for health monitoring
+ */
+export enum ConsumerState {
+  DISCONNECTED = 'disconnected',
+  CONNECTING = 'connecting',
+  CONNECTED = 'connected',        // Connected but no partitions yet
+  REBALANCING = 'rebalancing',    // Partitions temporarily revoked
+  ACTIVE = 'active',              // Has partitions, actively consuming
+  STALE = 'stale',                // Was active, lost partitions for too long
+}
+
+/**
+ * Partition assignment info
+ */
+export interface PartitionAssignment {
+  topic: string;
+  partition: number;
+}
+
+/**
+ * Consumer group metadata from GROUP_JOIN event
+ */
+export interface ConsumerGroupInfo {
+  groupId: string;
+  memberId: string;
+  isLeader: boolean;
+}
+
+/**
+ * Consumer health state for health checks
+ */
+export interface ConsumerHealthState {
+  state: ConsumerState;
+  isHealthy: boolean;
+  reason: string;
+}
+
 @Injectable()
 export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KafkaConsumerService.name);
   private consumer: Consumer;
   private isConnected = false;
+
+  // State tracking for health monitoring
+  private state: ConsumerState = ConsumerState.DISCONNECTED;
+  private assignedPartitions: PartitionAssignment[] = [];
+  private groupInfo: ConsumerGroupInfo | null = null;
+  private readonly startupTime = Date.now();
+  private lastPartitionAssignmentTime: number | null = null;
+  private rebalanceStartTime: number | null = null;
+
+  // Grace periods (configurable with tolerant defaults for production stability)
+  private readonly startupGracePeriodMs: number;
+  private readonly rebalanceGracePeriodMs: number;
+  private readonly staleThresholdMs: number;
+
+  // Default grace period values
+  private static readonly DEFAULT_STARTUP_GRACE_PERIOD_MS = 180000;      // 3 min after startup
+  private static readonly DEFAULT_REBALANCE_GRACE_PERIOD_MS = 120000;    // 2 min during rebalance
+  private static readonly DEFAULT_STALE_THRESHOLD_MS = 600000;           // 10 min without partitions = stale
 
   constructor(
     @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
@@ -36,7 +92,214 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       throw new Error('Consumer configuration is required');
     }
 
+    // Initialize configurable grace periods with defaults
+    this.startupGracePeriodMs = this.options.health?.startupGracePeriodMs
+      ?? KafkaConsumerService.DEFAULT_STARTUP_GRACE_PERIOD_MS;
+    this.rebalanceGracePeriodMs = this.options.health?.rebalanceGracePeriodMs
+      ?? KafkaConsumerService.DEFAULT_REBALANCE_GRACE_PERIOD_MS;
+    this.staleThresholdMs = this.options.health?.staleThresholdMs
+      ?? KafkaConsumerService.DEFAULT_STALE_THRESHOLD_MS;
+
     this.consumer = this.kafka.consumer(this.options.consumer);
+    this.setupConsumerEventListeners();
+  }
+
+  /**
+   * Set up KafkaJS consumer event listeners for state tracking.
+   * These events allow us to track the actual consumer state beyond just isConnected.
+   */
+  private setupConsumerEventListeners(): void {
+    // Safety check: consumer.events may not exist in test environments
+    if (!this.consumer?.events) {
+      this.logger.warn('Consumer events not available - state tracking will be limited');
+      return;
+    }
+
+    const { CONNECT, DISCONNECT, CRASH, GROUP_JOIN, REBALANCING } = this.consumer.events;
+
+    this.consumer.on(CONNECT, () => {
+      this.logger.log('Consumer connected to broker');
+      this.isConnected = true;
+      this.state = ConsumerState.CONNECTED;
+    });
+
+    this.consumer.on(DISCONNECT, () => {
+      this.logger.warn('Consumer disconnected from broker');
+      this.isConnected = false;
+      this.state = ConsumerState.DISCONNECTED;
+      this.assignedPartitions = [];
+    });
+
+    this.consumer.on(CRASH, ({ payload }) => {
+      this.logger.error('Consumer crashed', { error: payload.error, restart: payload.restart });
+      this.isConnected = false;
+      this.state = ConsumerState.DISCONNECTED;
+      this.assignedPartitions = [];
+    });
+
+    this.consumer.on(GROUP_JOIN, ({ payload }) => {
+      this.logger.log('Consumer joined group', {
+        groupId: payload.groupId,
+        memberId: payload.memberId,
+        isLeader: payload.isLeader,
+        memberAssignment: payload.memberAssignment,
+      });
+      this.state = ConsumerState.ACTIVE;
+      this.lastPartitionAssignmentTime = Date.now();
+      this.rebalanceStartTime = null;
+      this.groupInfo = {
+        groupId: payload.groupId,
+        memberId: payload.memberId,
+        isLeader: payload.isLeader,
+      };
+      this.assignedPartitions = this.extractPartitions(payload.memberAssignment);
+    });
+
+    this.consumer.on(REBALANCING, ({ payload }) => {
+      this.logger.warn('Consumer group rebalancing', { groupId: payload.groupId, memberId: payload.memberId });
+      this.state = ConsumerState.REBALANCING;
+      this.rebalanceStartTime = Date.now();
+      // Note: We don't clear assignedPartitions here to preserve last known state for logging
+    });
+  }
+
+  /**
+   * Extract partition assignments from KafkaJS memberAssignment format.
+   */
+  private extractPartitions(memberAssignment: Record<string, number[]>): PartitionAssignment[] {
+    const result: PartitionAssignment[] = [];
+    for (const [topic, partitions] of Object.entries(memberAssignment)) {
+      // Defensive check in case partitions is null/undefined
+      for (const partition of (partitions ?? [])) {
+        result.push({ topic, partition });
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get currently assigned partitions.
+   */
+  getAssignedPartitions(): PartitionAssignment[] {
+    return [...this.assignedPartitions];
+  }
+
+  /**
+   * Get consumer group information (groupId, memberId, isLeader).
+   * Returns null if the consumer has not joined a group yet.
+   */
+  getGroupInfo(): ConsumerGroupInfo | null {
+    return this.groupInfo ? { ...this.groupInfo } : null;
+  }
+
+  /**
+   * Check if consumer has any partitions assigned.
+   */
+  hasPartitionsAssigned(): boolean {
+    return this.assignedPartitions.length > 0;
+  }
+
+  /**
+   * Get health state with smart grace period handling.
+   * This method is designed to prevent unnecessary pod restarts during:
+   * - Startup (before partitions are assigned)
+   * - Normal rebalancing (partitions temporarily unassigned)
+   *
+   * Only marks unhealthy when consumer is truly stale (no partitions for extended period).
+   *
+   * Note: This method is read-only and does not mutate internal state.
+   * It computes the effective state based on current conditions.
+   */
+  getHealthState(): ConsumerHealthState {
+    const now = Date.now();
+    const timeSinceStart = now - this.startupTime;
+
+    // During startup grace period, always report healthy
+    if (timeSinceStart < this.startupGracePeriodMs) {
+      return {
+        state: this.state,
+        isHealthy: true,
+        reason: `Within startup grace period (${Math.round(timeSinceStart / 1000)}s / ${this.startupGracePeriodMs / 1000}s)`,
+      };
+    }
+
+    // During rebalance grace period, stay healthy
+    if (this.state === ConsumerState.REBALANCING && this.rebalanceStartTime) {
+      const rebalanceDuration = now - this.rebalanceStartTime;
+      if (rebalanceDuration < this.rebalanceGracePeriodMs) {
+        return {
+          state: this.state,
+          isHealthy: true,
+          reason: `Rebalancing (${Math.round(rebalanceDuration / 1000)}s / ${this.rebalanceGracePeriodMs / 1000}s max)`,
+        };
+      }
+      // Rebalance taking too long - compute as stale without mutating
+      return {
+        state: ConsumerState.STALE,
+        isHealthy: false,
+        reason: 'Consumer stale - rebalance exceeded grace period',
+      };
+    }
+
+    // Check for stale state (had partitions before, lost them, didn't get them back)
+    // Use local variable to compute effective state without mutation
+    let computedState = this.state;
+    if (
+      (this.state === ConsumerState.CONNECTED || this.state === ConsumerState.REBALANCING) &&
+      this.lastPartitionAssignmentTime
+    ) {
+      const timeSinceLastAssignment = now - this.lastPartitionAssignmentTime;
+      if (timeSinceLastAssignment > this.staleThresholdMs) {
+        computedState = ConsumerState.STALE;
+      }
+    }
+
+    // Final health determination based on computed state
+    switch (computedState) {
+      case ConsumerState.ACTIVE:
+        return {
+          state: computedState,
+          isHealthy: true,
+          reason: `Active with ${this.assignedPartitions.length} partition(s)`,
+        };
+      case ConsumerState.STALE:
+        return {
+          state: computedState,
+          isHealthy: false,
+          reason: 'Consumer stale - no partitions assigned for extended period',
+        };
+      case ConsumerState.DISCONNECTED:
+        return {
+          state: computedState,
+          isHealthy: false,
+          reason: 'Consumer disconnected from broker',
+        };
+      case ConsumerState.CONNECTED:
+        return {
+          state: computedState,
+          isHealthy: true,
+          reason: 'Connected, waiting for partition assignment',
+        };
+      case ConsumerState.CONNECTING:
+        return {
+          state: computedState,
+          isHealthy: true,
+          reason: 'Connecting to broker',
+        };
+      default:
+        return {
+          state: computedState,
+          isHealthy: true,
+          reason: `State: ${computedState}`,
+        };
+    }
+  }
+
+  /**
+   * Get current consumer state (for external monitoring).
+   */
+  getState(): ConsumerState {
+    return this.state;
   }
 
   async onModuleInit(): Promise<void> {
@@ -56,10 +319,20 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
+      // Set CONNECTING state before initiating connection
+      this.state = ConsumerState.CONNECTING;
+      this.logger.log('Connecting Kafka consumer...');
+
       await this.consumer.connect();
+      // Note: isConnected and state are updated by the CONNECT event listener
+      // but we set them here as well for environments where events may not fire
       this.isConnected = true;
+      if (this.state === ConsumerState.CONNECTING) {
+        this.state = ConsumerState.CONNECTED;
+      }
       this.logger.log('Kafka consumer connected successfully');
     } catch (error) {
+      this.state = ConsumerState.DISCONNECTED;
       this.logger.error('Failed to connect Kafka consumer', error.stack);
       throw error;
     }

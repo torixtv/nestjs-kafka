@@ -41,11 +41,16 @@ export interface KafkaHealthResult {
  * **Critical Checks (must pass for healthy status):**
  * - Broker reachability (producer or consumer connected)
  * - Bootstrap initialization complete
+ * - Consumer has partitions assigned (with smart grace periods)
  *
  * **Non-Critical Checks (informational only):**
- * - Partition assignment issues
  * - Retry consumer status
- * - Individual consumer scaling beyond partition count
+ *
+ * **Smart Grace Periods:**
+ * The consumer health check includes grace periods to avoid false positives:
+ * - Startup: 3 minutes grace period for initial partition assignment
+ * - Rebalancing: 2 minutes grace period during normal rebalances
+ * - Stale threshold: 10 minutes without partitions triggers unhealthy status
  *
  * @example
  * // Using with @nestjs/terminus
@@ -101,15 +106,16 @@ export class KafkaHealthIndicator {
     // Check critical components
     const brokerHealth = await this.checkBrokerConnection();
     const bootstrapHealth = this.checkBootstrapStatus();
+    const consumerHealth = this.checkConsumerHealth();
 
     // Check additional components (informational)
     const producerHealth = await this.checkProducerHealth();
-    const consumerHealth = this.checkConsumerHealth();
     const handlersHealth = this.checkHandlersRegistered();
     const retryHealth = this.checkRetryConsumerStatus();
 
-    // Determine overall health status based on CRITICAL checks only
-    const isCriticalHealthy = brokerHealth.healthy && bootstrapHealth.healthy;
+    // Determine overall health status based on CRITICAL checks
+    // Consumer health is now critical - but uses smart grace periods internally
+    const isCriticalHealthy = brokerHealth.healthy && bootstrapHealth.healthy && consumerHealth.healthy;
 
     return {
       status: isCriticalHealthy ? 'healthy' : 'unhealthy',
@@ -283,12 +289,17 @@ export class KafkaHealthIndicator {
   }
 
   /**
-   * Check consumer health (informational).
+   * Check consumer health using smart state tracking.
    *
-   * Note: Consumer may be connected but not have partitions assigned if
-   * the number of consumers in the group exceeds the number of partitions.
-   * This is NOT considered an error - the consumer is ready and will receive
-   * partitions when available (e.g., after rebalancing or scaling down).
+   * This check uses grace periods to avoid false positives during:
+   * - Startup (3 minutes grace period)
+   * - Rebalancing (2 minutes grace period)
+   *
+   * Only reports unhealthy when consumer is truly stale:
+   * - Disconnected from broker
+   * - No partitions assigned for > 10 minutes (after startup)
+   *
+   * This is now a CRITICAL check - unhealthy consumer will trigger pod restart.
    */
   private checkConsumerHealth(): ComponentHealth {
     try {
@@ -299,15 +310,30 @@ export class KafkaHealthIndicator {
         };
       }
 
-      const isConnected = (this.consumerService as any).isConnected;
+      // Use the smart health state tracking with grace periods
+      const healthState = this.consumerService.getHealthState();
+      const assignedPartitions = this.consumerService.getAssignedPartitions();
+      const groupInfo = this.consumerService.getGroupInfo();
+
+      // Group partitions by topic for clearer output
+      const topicPartitions = this.groupPartitionsByTopic(assignedPartitions);
 
       return {
-        healthy: isConnected,
-        message: isConnected
-          ? 'Consumer connected (may be waiting for partition assignment)'
-          : 'Consumer not connected',
+        healthy: healthState.isHealthy,
+        message: healthState.reason,
         details: {
-          note: 'No partitions assigned is normal when consumer group size > partition count',
+          state: healthState.state,
+          // Include consumer group metadata when available
+          ...(groupInfo && {
+            groupId: groupInfo.groupId,
+            memberId: groupInfo.memberId,
+            isLeader: groupInfo.isLeader,
+          }),
+          partitionsAssigned: assignedPartitions.length,
+          // New format: group by topic with partition list
+          topics: topicPartitions,
+          // Keep original format for backwards compatibility
+          partitions: assignedPartitions,
         },
       };
     } catch (error) {
@@ -316,6 +342,27 @@ export class KafkaHealthIndicator {
         message: `Consumer check failed: ${error.message}`,
       };
     }
+  }
+
+  /**
+   * Group partition assignments by topic for clearer health output.
+   * Returns an object where keys are topic names and values are arrays of partition numbers.
+   *
+   * Example: { "mux.video.events": [0], "video.asset.ready": [0, 1, 2] }
+   */
+  private groupPartitionsByTopic(partitions: { topic: string; partition: number }[]): Record<string, number[]> {
+    const grouped: Record<string, number[]> = {};
+    for (const { topic, partition } of partitions) {
+      if (!grouped[topic]) {
+        grouped[topic] = [];
+      }
+      grouped[topic].push(partition);
+    }
+    // Sort partitions within each topic for consistent output
+    for (const topic of Object.keys(grouped)) {
+      grouped[topic].sort((a, b) => a - b);
+    }
+    return grouped;
   }
 
   /**

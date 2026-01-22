@@ -41,6 +41,34 @@ export interface KafkaMonitoringOptions {
   path?: string;     // Default: 'kafka'
 }
 
+/**
+ * Health check configuration options for Kafka consumer.
+ * These options control the grace periods used to prevent unnecessary
+ * pod restarts during normal Kafka operations.
+ */
+export interface KafkaHealthOptions {
+  /**
+   * Grace period after startup before health checks become strict.
+   * During this period, the consumer is always reported as healthy.
+   * Default: 180000 (3 minutes)
+   */
+  startupGracePeriodMs?: number;
+
+  /**
+   * Grace period during rebalancing before marking consumer as stale.
+   * Rebalancing temporarily revokes partitions, so we allow time for reassignment.
+   * Default: 120000 (2 minutes)
+   */
+  rebalanceGracePeriodMs?: number;
+
+  /**
+   * Time without partitions after which consumer is considered stale.
+   * Only applies after consumer previously had partitions assigned.
+   * Default: 600000 (10 minutes)
+   */
+  staleThresholdMs?: number;
+}
+
 export interface KafkaModuleOptions {
   client?: KafkaConfig;
   consumer?: ConsumerConfig;
@@ -49,6 +77,7 @@ export interface KafkaModuleOptions {
   retry?: KafkaRetryOptions;
   dlq?: KafkaDlqOptions;
   monitoring?: KafkaMonitoringOptions;
+  health?: KafkaHealthOptions;
 }
 
 export interface KafkaModuleOptionsFactory {
