@@ -439,14 +439,45 @@ describe('KafkaConsumerService Integration', () => {
       expect(service.getAssignedPartitions()).toEqual([]);
     });
 
-    it('should transition to DISCONNECTED on CRASH event', () => {
+    it('should enter REBALANCING grace period on CRASH with restart=true', () => {
       eventHandlers['consumer.connect']?.();
 
       eventHandlers['consumer.crash']?.({
-        payload: { error: new Error('Test crash'), restart: false },
+        payload: { error: new Error('Test crash'), restart: true },
       });
 
-      expect(service.getState()).toBe(ConsumerState.DISCONNECTED);
+      // Should use REBALANCING state to leverage grace period while KafkaJS auto-restarts
+      expect(service.getState()).toBe(ConsumerState.REBALANCING);
+    });
+
+    it('should attempt manual recovery on CRASH with restart=false and recover', async () => {
+      eventHandlers['consumer.connect']?.();
+
+      // Mock connect to succeed on recovery
+      mockConsumer.connect.mockResolvedValue(undefined);
+
+      jest.useFakeTimers();
+
+      // Fire crash handler (async, will schedule setTimeout for recovery)
+      eventHandlers['consumer.crash']?.({
+        payload: { error: new Error('Non-retryable crash'), restart: false },
+      });
+
+      // Initially enters REBALANCING for grace period during recovery
+      expect(service.getState()).toBe(ConsumerState.REBALANCING);
+
+      // Advance past first recovery delay (5s) and flush promises
+      jest.advanceTimersByTime(5000);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      jest.useRealTimers();
+
+      // Recovery should succeed — state should be CONNECTED (before GROUP_JOIN makes it ACTIVE)
+      expect(service.getState()).toBe(ConsumerState.CONNECTED);
+      expect(mockConsumer.connect).toHaveBeenCalled();
+      expect(mockConsumer.run).toHaveBeenCalled();
     });
 
     it('should transition to ACTIVE on GROUP_JOIN event', () => {

@@ -130,11 +130,68 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.assignedPartitions = [];
     });
 
-    this.consumer.on(CRASH, ({ payload }) => {
+    this.consumer.on(CRASH, async ({ payload }) => {
       this.logger.error('Consumer crashed', { error: payload.error, restart: payload.restart });
       this.isConnected = false;
-      this.state = ConsumerState.DISCONNECTED;
       this.assignedPartitions = [];
+
+      if (payload.restart) {
+        // KafkaJS will auto-restart the consumer — use REBALANCING state to trigger
+        // the existing grace period, giving KafkaJS time to restart before health
+        // checks report unhealthy and K8s kills the pod.
+        // Without this, the DISCONNECTED state causes immediate health check failure,
+        // and the pod is killed before KafkaJS's auto-restart completes (~6.6s).
+        this.state = ConsumerState.REBALANCING;
+        this.rebalanceStartTime = Date.now();
+        this.logger.warn('KafkaJS will auto-restart consumer, entering recovery grace period');
+      } else {
+        // KafkaJS will NOT auto-restart (non-retryable error).
+        // Attempt manual recovery with exponential backoff.
+        // This handles Redpanda Serverless scenarios where "non-retryable" errors
+        // (e.g., BROKER_NOT_AVAILABLE during partition leader elections) are transient.
+        this.state = ConsumerState.REBALANCING;
+        this.rebalanceStartTime = Date.now();
+        this.logger.warn('KafkaJS will not auto-restart, attempting manual recovery');
+
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000);
+          this.logger.log(`Manual recovery attempt ${attempt}/5 in ${delay}ms`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+
+          try {
+            await this.consumer.connect();
+            this.isConnected = true;
+            this.state = ConsumerState.CONNECTED;
+
+            // Re-subscribe to topics
+            if (this.options.subscriptions?.topics) {
+              for (const topic of this.options.subscriptions.topics) {
+                await this.consumer.subscribe({
+                  topic,
+                  fromBeginning: this.options.subscriptions.fromBeginning ?? false,
+                });
+              }
+            }
+
+            await this.consumer.run({
+              eachMessage: async (msgPayload: EachMessagePayload) => {
+                await this.handleMessage(msgPayload);
+              },
+            });
+
+            this.logger.log(`Consumer recovered after ${attempt} attempt(s)`);
+            return;
+          } catch (recoveryError) {
+            this.logger.warn(`Manual recovery attempt ${attempt}/5 failed`, {
+              error: recoveryError.message,
+            });
+          }
+        }
+
+        // All recovery attempts exhausted — mark as disconnected
+        this.state = ConsumerState.DISCONNECTED;
+        this.logger.error('Manual recovery exhausted all 5 attempts — consumer requires pod restart');
+      }
     });
 
     this.consumer.on(GROUP_JOIN, ({ payload }) => {
