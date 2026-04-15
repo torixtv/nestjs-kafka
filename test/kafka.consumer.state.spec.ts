@@ -466,11 +466,8 @@ describe('KafkaConsumerService Integration', () => {
       // Initially enters REBALANCING for grace period during recovery
       expect(service.getState()).toBe(ConsumerState.REBALANCING);
 
-      // Advance past first recovery delay (5s) and flush promises
-      jest.advanceTimersByTime(5000);
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      // Advance past first recovery delay (5s) — drains microtasks automatically
+      await jest.advanceTimersByTimeAsync(5000);
 
       jest.useRealTimers();
 
@@ -478,6 +475,29 @@ describe('KafkaConsumerService Integration', () => {
       expect(service.getState()).toBe(ConsumerState.CONNECTED);
       expect(mockConsumer.connect).toHaveBeenCalled();
       expect(mockConsumer.run).toHaveBeenCalled();
+    });
+
+    it('should transition to DISCONNECTED after all recovery attempts are exhausted', async () => {
+      eventHandlers['consumer.connect']?.();
+
+      // Mock connect to always fail during recovery
+      mockConsumer.connect.mockRejectedValue(new Error('Connection refused'));
+
+      jest.useFakeTimers();
+
+      eventHandlers['consumer.crash']?.({
+        payload: { error: new Error('Non-retryable crash'), restart: false },
+      });
+
+      expect(service.getState()).toBe(ConsumerState.REBALANCING);
+
+      // Advance through all 5 recovery delays: 5s + 10s + 20s + 40s + 60s = 135s
+      await jest.advanceTimersByTimeAsync(135000);
+
+      jest.useRealTimers();
+
+      expect(service.getState()).toBe(ConsumerState.DISCONNECTED);
+      expect(mockConsumer.connect).toHaveBeenCalledTimes(5);
     });
 
     it('should transition to ACTIVE on GROUP_JOIN event', () => {

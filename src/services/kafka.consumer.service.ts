@@ -154,14 +154,16 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn('KafkaJS will not auto-restart, attempting manual recovery');
 
         for (let attempt = 1; attempt <= 5; attempt++) {
+          // Reset grace period timer each attempt so health checks stay healthy
+          // throughout the full recovery window (prevents K8s pod kill mid-recovery)
+          this.rebalanceStartTime = Date.now();
+
           const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000);
           this.logger.log(`Manual recovery attempt ${attempt}/5 in ${delay}ms`);
           await new Promise(resolve => setTimeout(resolve, delay));
 
           try {
             await this.consumer.connect();
-            this.isConnected = true;
-            this.state = ConsumerState.CONNECTED;
 
             // Re-subscribe to topics
             if (this.options.subscriptions?.topics) {
@@ -179,9 +181,13 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
               },
             });
 
+            this.isConnected = true;
+            this.state = ConsumerState.CONNECTED;
             this.logger.log(`Consumer recovered after ${attempt} attempt(s)`);
             return;
           } catch (recoveryError) {
+            this.isConnected = false;
+            this.state = ConsumerState.REBALANCING;
             this.logger.warn(`Manual recovery attempt ${attempt}/5 failed`, {
               error: recoveryError.message,
             });
