@@ -145,58 +145,10 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
         this.rebalanceStartTime = Date.now();
         this.logger.warn('KafkaJS will auto-restart consumer, entering recovery grace period');
       } else {
-        // KafkaJS will NOT auto-restart (non-retryable error).
-        // Attempt manual recovery with exponential backoff.
-        // This handles Redpanda Serverless scenarios where "non-retryable" errors
-        // (e.g., BROKER_NOT_AVAILABLE during partition leader elections) are transient.
-        this.state = ConsumerState.REBALANCING;
-        this.rebalanceStartTime = Date.now();
-        this.logger.warn('KafkaJS will not auto-restart, attempting manual recovery');
-
-        for (let attempt = 1; attempt <= 5; attempt++) {
-          // Reset grace period timer each attempt so health checks stay healthy
-          // throughout the full recovery window (prevents K8s pod kill mid-recovery)
-          this.rebalanceStartTime = Date.now();
-
-          const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000);
-          this.logger.log(`Manual recovery attempt ${attempt}/5 in ${delay}ms`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-
-          try {
-            await this.consumer.connect();
-
-            // Re-subscribe to topics
-            if (this.options.subscriptions?.topics) {
-              for (const topic of this.options.subscriptions.topics) {
-                await this.consumer.subscribe({
-                  topic,
-                  fromBeginning: this.options.subscriptions.fromBeginning ?? false,
-                });
-              }
-            }
-
-            await this.consumer.run({
-              eachMessage: async (msgPayload: EachMessagePayload) => {
-                await this.handleMessage(msgPayload);
-              },
-            });
-
-            this.isConnected = true;
-            this.state = ConsumerState.CONNECTED;
-            this.logger.log(`Consumer recovered after ${attempt} attempt(s)`);
-            return;
-          } catch (recoveryError) {
-            this.isConnected = false;
-            this.state = ConsumerState.REBALANCING;
-            this.logger.warn(`Manual recovery attempt ${attempt}/5 failed`, {
-              error: recoveryError.message,
-            });
-          }
-        }
-
-        // All recovery attempts exhausted — mark as disconnected
+        // KafkaJS decided not to restart this consumer. Preserve that fail-fast
+        // behavior so services can opt out via consumer.retry.restartOnFailure.
         this.state = ConsumerState.DISCONNECTED;
-        this.logger.error('Manual recovery exhausted all 5 attempts — consumer requires pod restart');
+        this.rebalanceStartTime = null;
       }
     });
 
