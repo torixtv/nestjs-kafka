@@ -439,14 +439,27 @@ describe('KafkaConsumerService Integration', () => {
       expect(service.getAssignedPartitions()).toEqual([]);
     });
 
-    it('should transition to DISCONNECTED on CRASH event', () => {
+    it('should enter REBALANCING grace period on CRASH with restart=true', () => {
       eventHandlers['consumer.connect']?.();
 
       eventHandlers['consumer.crash']?.({
-        payload: { error: new Error('Test crash'), restart: false },
+        payload: { error: new Error('Test crash'), restart: true },
+      });
+
+      // Should use REBALANCING state to leverage grace period while KafkaJS auto-restarts
+      expect(service.getState()).toBe(ConsumerState.REBALANCING);
+    });
+
+    it('should transition to DISCONNECTED on CRASH with restart=false', () => {
+      eventHandlers['consumer.connect']?.();
+
+      eventHandlers['consumer.crash']?.({
+        payload: { error: new Error('Non-retryable crash'), restart: false },
       });
 
       expect(service.getState()).toBe(ConsumerState.DISCONNECTED);
+      expect(mockConsumer.connect).not.toHaveBeenCalled();
+      expect(mockConsumer.run).not.toHaveBeenCalled();
     });
 
     it('should transition to ACTIVE on GROUP_JOIN event', () => {

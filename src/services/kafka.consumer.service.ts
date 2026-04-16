@@ -130,11 +130,26 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.assignedPartitions = [];
     });
 
-    this.consumer.on(CRASH, ({ payload }) => {
+    this.consumer.on(CRASH, async ({ payload }) => {
       this.logger.error('Consumer crashed', { error: payload.error, restart: payload.restart });
       this.isConnected = false;
-      this.state = ConsumerState.DISCONNECTED;
       this.assignedPartitions = [];
+
+      if (payload.restart) {
+        // KafkaJS will auto-restart the consumer — use REBALANCING state to trigger
+        // the existing grace period, giving KafkaJS time to restart before health
+        // checks report unhealthy and K8s kills the pod.
+        // Without this, the DISCONNECTED state causes immediate health check failure,
+        // and the pod is killed before KafkaJS's auto-restart completes (~6.6s).
+        this.state = ConsumerState.REBALANCING;
+        this.rebalanceStartTime = Date.now();
+        this.logger.warn('KafkaJS will auto-restart consumer, entering recovery grace period');
+      } else {
+        // KafkaJS decided not to restart this consumer. Preserve that fail-fast
+        // behavior so services can opt out via consumer.retry.restartOnFailure.
+        this.state = ConsumerState.DISCONNECTED;
+        this.rebalanceStartTime = null;
+      }
     });
 
     this.consumer.on(GROUP_JOIN, ({ payload }) => {
