@@ -70,6 +70,9 @@ export {
   readSaslConfigFromEnv,
   applyConfigurationSmartDefaults,
   mergeWithEnvironmentConfig,
+  toNumber,
+  toBoolean,
+  coerceKafkaModuleOptions,
 } from './utils/config.utils';
 
 // Health module exports (optional - for @nestjs/terminus integration)

@@ -3,6 +3,9 @@ import {
   readSaslConfigFromEnv,
   applyConfigurationSmartDefaults,
   mergeWithEnvironmentConfig,
+  toNumber,
+  toBoolean,
+  coerceKafkaModuleOptions,
 } from './config.utils';
 
 describe('Configuration Utils', () => {
@@ -347,6 +350,299 @@ describe('Configuration Utils', () => {
       expect(result.clientId).toBe('test-client');
       expect(result.connectionTimeout).toBe(5000);
       expect(result.requestTimeout).toBe(3000);
+    });
+  });
+
+  describe('toNumber', () => {
+    it('passes through finite numbers', () => {
+      expect(toNumber(3000)).toBe(3000);
+      expect(toNumber(0)).toBe(0);
+      expect(toNumber(-1)).toBe(-1);
+    });
+
+    it('parses numeric strings', () => {
+      expect(toNumber('3000')).toBe(3000);
+      expect(toNumber('  42 ')).toBe(42);
+      expect(toNumber('3.14')).toBe(3.14);
+    });
+
+    it('returns fallback for null/undefined', () => {
+      expect(toNumber(null, 500)).toBe(500);
+      expect(toNumber(undefined, 500)).toBe(500);
+      expect(toNumber(null)).toBeUndefined();
+    });
+
+    it('returns fallback for non-parseable strings', () => {
+      expect(toNumber('abc', 500)).toBe(500);
+      expect(toNumber('', 500)).toBe(500);
+      expect(toNumber('   ', 500)).toBe(500);
+    });
+
+    it('returns fallback for non-finite numbers', () => {
+      expect(toNumber(NaN, 500)).toBe(500);
+      expect(toNumber(Infinity, 500)).toBe(500);
+    });
+
+    it('returns fallback for unsupported types', () => {
+      expect(toNumber(true, 500)).toBe(500);
+      expect(toNumber({}, 500)).toBe(500);
+      expect(toNumber([], 500)).toBe(500);
+    });
+  });
+
+  describe('toBoolean', () => {
+    it('passes through booleans', () => {
+      expect(toBoolean(true)).toBe(true);
+      expect(toBoolean(false)).toBe(false);
+    });
+
+    it('recognizes truthy strings', () => {
+      expect(toBoolean('true')).toBe(true);
+      expect(toBoolean('TRUE')).toBe(true);
+      expect(toBoolean('1')).toBe(true);
+      expect(toBoolean('yes')).toBe(true);
+      expect(toBoolean(' Yes ')).toBe(true);
+    });
+
+    it('recognizes falsy strings', () => {
+      expect(toBoolean('false')).toBe(false);
+      expect(toBoolean('FALSE')).toBe(false);
+      expect(toBoolean('0')).toBe(false);
+      expect(toBoolean('no')).toBe(false);
+    });
+
+    it('returns fallback for null/undefined', () => {
+      expect(toBoolean(null, true)).toBe(true);
+      expect(toBoolean(undefined, false)).toBe(false);
+      expect(toBoolean(null)).toBeUndefined();
+    });
+
+    it('returns fallback for unrecognized strings', () => {
+      expect(toBoolean('maybe', true)).toBe(true);
+      expect(toBoolean('', false)).toBe(false);
+    });
+  });
+
+  describe('coerceKafkaModuleOptions', () => {
+    it('returns empty options unchanged', () => {
+      expect(coerceKafkaModuleOptions({})).toEqual({});
+      expect(coerceKafkaModuleOptions()).toEqual({});
+    });
+
+    it('does not mutate the input object', () => {
+      const input = {
+        client: { brokers: ['localhost:9092'], connectionTimeout: '3000' as any },
+        retry: { enabled: 'true' as any, attempts: '5' as any },
+      };
+      const result = coerceKafkaModuleOptions(input);
+
+      expect(result).not.toBe(input);
+      expect(result.client).not.toBe(input.client);
+      expect(result.retry).not.toBe(input.retry);
+      expect(input.client.connectionTimeout).toBe('3000');
+      expect(input.retry.enabled).toBe('true');
+    });
+
+    it('coerces client numeric fields from strings', () => {
+      const result = coerceKafkaModuleOptions({
+        client: {
+          brokers: ['localhost:9092'],
+          connectionTimeout: '3000' as any,
+          requestTimeout: '30000' as any,
+        },
+      });
+
+      expect(result.client?.connectionTimeout).toBe(3000);
+      expect(result.client?.requestTimeout).toBe(30000);
+      expect(result.client?.brokers).toEqual(['localhost:9092']);
+    });
+
+    it('coerces consumer numeric + boolean fields', () => {
+      const result = coerceKafkaModuleOptions({
+        consumer: {
+          groupId: 'g',
+          sessionTimeout: '30000' as any,
+          heartbeatInterval: '3000' as any,
+          maxWaitTimeInMs: '100' as any,
+          allowAutoTopicCreation: 'true' as any,
+        },
+      });
+
+      expect(result.consumer?.sessionTimeout).toBe(30000);
+      expect(result.consumer?.heartbeatInterval).toBe(3000);
+      expect(result.consumer?.maxWaitTimeInMs).toBe(100);
+      expect(result.consumer?.allowAutoTopicCreation).toBe(true);
+      expect(result.consumer?.groupId).toBe('g');
+    });
+
+    it('coerces producer fields', () => {
+      const result = coerceKafkaModuleOptions({
+        producer: {
+          maxInFlightRequests: '1' as any,
+          idempotent: 'true' as any,
+          transactionTimeout: '30000' as any,
+        },
+      });
+
+      expect(result.producer?.maxInFlightRequests).toBe(1);
+      expect(result.producer?.idempotent).toBe(true);
+      expect(result.producer?.transactionTimeout).toBe(30000);
+    });
+
+    it('coerces retry fields', () => {
+      const result = coerceKafkaModuleOptions({
+        retry: {
+          enabled: 'true' as any,
+          attempts: '3' as any,
+          baseDelay: '2000' as any,
+          maxDelay: '30000' as any,
+          topicPartitions: '3' as any,
+          topicReplicationFactor: '1' as any,
+          topicRetentionMs: '86400000' as any,
+          backoff: 'exponential',
+        },
+      });
+
+      expect(result.retry?.enabled).toBe(true);
+      expect(result.retry?.attempts).toBe(3);
+      expect(result.retry?.baseDelay).toBe(2000);
+      expect(result.retry?.maxDelay).toBe(30000);
+      expect(result.retry?.topicPartitions).toBe(3);
+      expect(result.retry?.topicReplicationFactor).toBe(1);
+      expect(result.retry?.topicRetentionMs).toBe(86400000);
+      expect(result.retry?.backoff).toBe('exponential');
+    });
+
+    it('coerces dlq fields including nested reprocessingOptions', () => {
+      const result = coerceKafkaModuleOptions({
+        dlq: {
+          enabled: 'true' as any,
+          topicPartitions: '3' as any,
+          topicReplicationFactor: '1' as any,
+          topicRetentionMs: '604800000' as any,
+          reprocessingOptions: {
+            batchSize: '100' as any,
+            timeoutMs: '30000' as any,
+            stopOnError: 'false' as any,
+          },
+        },
+      });
+
+      expect(result.dlq?.enabled).toBe(true);
+      expect(result.dlq?.topicPartitions).toBe(3);
+      expect(result.dlq?.reprocessingOptions?.batchSize).toBe(100);
+      expect(result.dlq?.reprocessingOptions?.timeoutMs).toBe(30000);
+      expect(result.dlq?.reprocessingOptions?.stopOnError).toBe(false);
+    });
+
+    it('coerces subscriptions.fromBeginning', () => {
+      const result = coerceKafkaModuleOptions({
+        subscriptions: { topics: ['t1'], fromBeginning: 'true' as any },
+      });
+
+      expect(result.subscriptions?.fromBeginning).toBe(true);
+      expect(result.subscriptions?.topics).toEqual(['t1']);
+    });
+
+    it('coerces monitoring.enabled', () => {
+      const result = coerceKafkaModuleOptions({
+        monitoring: { enabled: 'false' as any },
+      });
+
+      expect(result.monitoring?.enabled).toBe(false);
+    });
+
+    it('coerces health numeric fields', () => {
+      const result = coerceKafkaModuleOptions({
+        health: {
+          startupGracePeriodMs: '180000' as any,
+          rebalanceGracePeriodMs: '120000' as any,
+          staleThresholdMs: '600000' as any,
+        },
+      });
+
+      expect(result.health?.startupGracePeriodMs).toBe(180000);
+      expect(result.health?.rebalanceGracePeriodMs).toBe(120000);
+      expect(result.health?.staleThresholdMs).toBe(600000);
+    });
+
+    it('leaves already-typed values untouched', () => {
+      const result = coerceKafkaModuleOptions({
+        client: { brokers: ['localhost:9092'], connectionTimeout: 3000 },
+        retry: { enabled: true, attempts: 3 },
+      });
+
+      expect(result.client?.connectionTimeout).toBe(3000);
+      expect(result.retry?.enabled).toBe(true);
+      expect(result.retry?.attempts).toBe(3);
+    });
+
+    it('drops unparseable string numbers rather than crashing', () => {
+      const result = coerceKafkaModuleOptions({
+        client: { brokers: ['localhost:9092'], connectionTimeout: 'not-a-number' as any },
+      });
+
+      expect(result.client?.connectionTimeout).toBeUndefined();
+    });
+
+    it('coerces ssl string but preserves object form', () => {
+      const resultString = coerceKafkaModuleOptions({
+        client: { brokers: ['localhost:9092'], ssl: 'true' as any },
+      });
+      expect(resultString.client?.ssl).toBe(true);
+
+      const tlsOpts = { rejectUnauthorized: false };
+      const resultObject = coerceKafkaModuleOptions({
+        client: { brokers: ['localhost:9092'], ssl: tlsOpts },
+      });
+      expect(resultObject.client?.ssl).toBe(tlsOpts);
+    });
+
+    it('simulates a full NestJS ConfigService-derived options bag', () => {
+      // Every field is a string — this is exactly what hits the module
+      // when consumers wire `configService.get<number>('KAFKA_...')` directly.
+      const result = coerceKafkaModuleOptions({
+        client: {
+          clientId: 'test',
+          brokers: ['localhost:9092'],
+          connectionTimeout: '3000' as any,
+          requestTimeout: '30000' as any,
+        },
+        consumer: {
+          groupId: 'g',
+          sessionTimeout: '30000' as any,
+          heartbeatInterval: '3000' as any,
+          maxWaitTimeInMs: '100' as any,
+          allowAutoTopicCreation: 'true' as any,
+        },
+        producer: {
+          maxInFlightRequests: '1' as any,
+          idempotent: 'true' as any,
+          transactionTimeout: '30000' as any,
+        },
+        retry: {
+          enabled: 'true' as any,
+          attempts: '3' as any,
+          baseDelay: '2000' as any,
+          maxDelay: '30000' as any,
+        },
+        dlq: {
+          enabled: 'true' as any,
+          topicPartitions: '3' as any,
+        },
+        subscriptions: { topics: [], fromBeginning: 'false' as any },
+        monitoring: { enabled: 'true' as any },
+      });
+
+      expect(typeof result.client?.connectionTimeout).toBe('number');
+      expect(typeof result.consumer?.sessionTimeout).toBe('number');
+      expect(typeof result.consumer?.allowAutoTopicCreation).toBe('boolean');
+      expect(typeof result.producer?.idempotent).toBe('boolean');
+      expect(typeof result.retry?.enabled).toBe('boolean');
+      expect(typeof result.retry?.attempts).toBe('number');
+      expect(typeof result.dlq?.enabled).toBe('boolean');
+      expect(typeof result.subscriptions?.fromBeginning).toBe('boolean');
+      expect(typeof result.monitoring?.enabled).toBe('boolean');
     });
   });
 
