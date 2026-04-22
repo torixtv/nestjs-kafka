@@ -17,7 +17,7 @@ import { KafkaDlqService } from '../services/kafka.dlq.service';
 import { KafkaConsumerService } from '../services/kafka.consumer.service';
 import { KafkaBootstrapService } from '../services/kafka.bootstrap.service';
 import { KafkaMonitoringController } from '../monitoring/kafka-monitoring.controller';
-import { mergeWithEnvironmentConfig } from '../utils/config.utils';
+import { coerceKafkaModuleOptions, mergeWithEnvironmentConfig } from '../utils/config.utils';
 import { KafkaHealthIndicator } from '../health';
 
 @Global()
@@ -168,8 +168,11 @@ export class KafkaModule {
   }
 
   private static mergeWithDefaults(
-    userOptions: KafkaModuleOptions = {},
+    rawUserOptions: KafkaModuleOptions = {},
   ): KafkaModuleOptions {
+    // Coerce env-var-derived string values (e.g. from NestJS ConfigService) to
+    // number/boolean before merging — kafkajs strictly validates types at runtime.
+    const userOptions = coerceKafkaModuleOptions(rawUserOptions);
     const defaults: KafkaModuleOptions = {
       client: {
         clientId: 'kafka-client',
