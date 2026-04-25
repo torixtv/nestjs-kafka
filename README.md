@@ -1319,6 +1319,33 @@ The health indicator uses **intelligent health checks** that distinguish between
 
 This design ensures your service remains healthy even when scaled beyond the number of Kafka topic partitions.
 
+#### Health Grace Periods
+
+The consumer health indicator applies grace periods to prevent unnecessary pod restarts during transient Kafka events (broker decommissions, leader transitions, normal rebalancing). All defaults are tuned for production stability and can be overridden via `health` options on `KafkaModule.forRoot`.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `startupGracePeriodMs` | `180000` (3 min) | Always healthy during this window after process start, regardless of state. |
+| `rebalanceGracePeriodMs` | `120000` (2 min) | Stays healthy while in `REBALANCING` state. |
+| `staleThresholdMs` | `600000` (10 min) | After this long without partitions (and the consumer previously had some), reports stale. |
+| `disconnectGracePeriodMs` | `60000` (60 s) | Stays healthy after a transient disconnect (DISCONNECT event or `CRASH` with `restart=true`) while KafkaJS auto-reconnects. Fail-fast crashes (`restart=false`) skip this grace period. |
+
+```typescript
+KafkaModule.forRoot({
+  client: { brokers: ['localhost:9092'] },
+  consumer: { groupId: 'my-service' },
+  health: {
+    // Tune to taste — these match the defaults
+    startupGracePeriodMs: 180_000,
+    rebalanceGracePeriodMs: 120_000,
+    staleThresholdMs: 600_000,
+    disconnectGracePeriodMs: 60_000,
+  },
+});
+```
+
+When the consumer is recovering from a transient disconnect, the health reason field shows `Recovering from disconnect (Xs / 60s max)`. Once the grace period elapses without reconnect, it switches to `Consumer disconnected from broker (exceeded grace period)` and the indicator goes unhealthy — at which point Kubernetes liveness probes will (correctly) restart the pod.
+
 #### Basic Setup
 
 ```typescript

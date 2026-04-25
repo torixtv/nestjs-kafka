@@ -69,16 +69,19 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly startupTime = Date.now();
   private lastPartitionAssignmentTime: number | null = null;
   private rebalanceStartTime: number | null = null;
+  private disconnectedAt: number | null = null;
 
   // Grace periods (configurable with tolerant defaults for production stability)
   private readonly startupGracePeriodMs: number;
   private readonly rebalanceGracePeriodMs: number;
   private readonly staleThresholdMs: number;
+  private readonly disconnectGracePeriodMs: number;
 
   // Default grace period values
   private static readonly DEFAULT_STARTUP_GRACE_PERIOD_MS = 180000;      // 3 min after startup
   private static readonly DEFAULT_REBALANCE_GRACE_PERIOD_MS = 120000;    // 2 min during rebalance
   private static readonly DEFAULT_STALE_THRESHOLD_MS = 600000;           // 10 min without partitions = stale
+  private static readonly DEFAULT_DISCONNECT_GRACE_PERIOD_MS = 60000;    // 60s for transient disconnect recovery
 
   constructor(
     @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
@@ -99,6 +102,8 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       ?? KafkaConsumerService.DEFAULT_REBALANCE_GRACE_PERIOD_MS;
     this.staleThresholdMs = this.options.health?.staleThresholdMs
       ?? KafkaConsumerService.DEFAULT_STALE_THRESHOLD_MS;
+    this.disconnectGracePeriodMs = this.options.health?.disconnectGracePeriodMs
+      ?? KafkaConsumerService.DEFAULT_DISCONNECT_GRACE_PERIOD_MS;
 
     this.consumer = this.kafka.consumer(this.options.consumer);
     this.setupConsumerEventListeners();
@@ -121,6 +126,7 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Consumer connected to broker');
       this.isConnected = true;
       this.state = ConsumerState.CONNECTED;
+      this.disconnectedAt = null;
     });
 
     this.consumer.on(DISCONNECT, () => {
@@ -128,27 +134,28 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.isConnected = false;
       this.state = ConsumerState.DISCONNECTED;
       this.assignedPartitions = [];
+      this.disconnectedAt = Date.now();
     });
 
     this.consumer.on(CRASH, async ({ payload }) => {
       this.logger.error('Consumer crashed', { error: payload.error, restart: payload.restart });
       this.isConnected = false;
       this.assignedPartitions = [];
+      this.state = ConsumerState.DISCONNECTED;
+      this.rebalanceStartTime = null;
 
       if (payload.restart) {
-        // KafkaJS will auto-restart the consumer — use REBALANCING state to trigger
-        // the existing grace period, giving KafkaJS time to restart before health
-        // checks report unhealthy and K8s kills the pod.
-        // Without this, the DISCONNECTED state causes immediate health check failure,
-        // and the pod is killed before KafkaJS's auto-restart completes (~6.6s).
-        this.state = ConsumerState.REBALANCING;
-        this.rebalanceStartTime = Date.now();
-        this.logger.warn('KafkaJS will auto-restart consumer, entering recovery grace period');
+        // KafkaJS will auto-restart the consumer. Set disconnectedAt so the
+        // disconnect grace period applies — health checks stay healthy while
+        // KafkaJS reconnects (~25–30s in production), preventing K8s from
+        // killing the pod mid-recovery.
+        this.disconnectedAt = Date.now();
+        this.logger.warn('KafkaJS will auto-restart consumer, entering disconnect grace period');
       } else {
-        // KafkaJS decided not to restart this consumer. Preserve that fail-fast
-        // behavior so services can opt out via consumer.retry.restartOnFailure.
-        this.state = ConsumerState.DISCONNECTED;
-        this.rebalanceStartTime = null;
+        // KafkaJS decided not to restart. Preserve fail-fast behavior so
+        // services can opt out via consumer.retry.restartOnFailure — leave
+        // disconnectedAt null so the grace period does not apply.
+        this.disconnectedAt = null;
       }
     });
 
@@ -162,6 +169,7 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.state = ConsumerState.ACTIVE;
       this.lastPartitionAssignmentTime = Date.now();
       this.rebalanceStartTime = null;
+      this.disconnectedAt = null;
       this.groupInfo = {
         groupId: payload.groupId,
         memberId: payload.memberId,
@@ -284,6 +292,24 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
           reason: 'Consumer stale - no partitions assigned for extended period',
         };
       case ConsumerState.DISCONNECTED:
+        // Apply disconnect grace period for transient disconnects with auto-restart.
+        // disconnectedAt is set on DISCONNECT, CRASH(restart=true), and connect() failure;
+        // it stays null on CRASH(restart=false) to preserve fail-fast semantics.
+        if (this.disconnectedAt) {
+          const disconnectDuration = now - this.disconnectedAt;
+          if (disconnectDuration < this.disconnectGracePeriodMs) {
+            return {
+              state: computedState,
+              isHealthy: true,
+              reason: `Recovering from disconnect (${Math.round(disconnectDuration / 1000)}s / ${this.disconnectGracePeriodMs / 1000}s max)`,
+            };
+          }
+          return {
+            state: computedState,
+            isHealthy: false,
+            reason: 'Consumer disconnected from broker (exceeded grace period)',
+          };
+        }
         return {
           state: computedState,
           isHealthy: false,
@@ -345,9 +371,11 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       if (this.state === ConsumerState.CONNECTING) {
         this.state = ConsumerState.CONNECTED;
       }
+      this.disconnectedAt = null;
       this.logger.log('Kafka consumer connected successfully');
     } catch (error) {
       this.state = ConsumerState.DISCONNECTED;
+      this.disconnectedAt = Date.now();
       this.logger.error('Failed to connect Kafka consumer', error.stack);
       throw error;
     }
