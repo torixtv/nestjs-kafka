@@ -375,7 +375,11 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Kafka consumer connected successfully');
     } catch (error) {
       this.state = ConsumerState.DISCONNECTED;
-      this.disconnectedAt = Date.now();
+      // Intentionally do NOT touch disconnectedAt here. Initial-connect failures
+      // are covered by the startup grace period; runtime reconnect attempts always
+      // follow a DISCONNECT/CRASH event that has already set disconnectedAt as
+      // appropriate. Setting it here would silently restore the grace window
+      // after a CRASH(restart=false), defeating the fail-fast opt-out.
       this.logger.error('Failed to connect Kafka consumer', error.stack);
       throw error;
     }

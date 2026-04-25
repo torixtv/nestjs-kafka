@@ -859,6 +859,71 @@ describe('KafkaConsumerService Integration', () => {
 
       await localModule.close();
     });
+
+    it('should preserve fail-fast when connect() is retried after CRASH(restart=false)', async () => {
+      // Regression test for the failure mode where connect() catch unconditionally
+      // set disconnectedAt, silently restoring the grace window and overriding the
+      // user's fail-fast opt-out via consumer.retry.restartOnFailure.
+      const localHandlers: Record<string, (...args: any[]) => void> = {};
+      const localConsumer = {
+        events: {
+          CONNECT: 'consumer.connect',
+          DISCONNECT: 'consumer.disconnect',
+          CRASH: 'consumer.crash',
+          GROUP_JOIN: 'consumer.group_join',
+          REBALANCING: 'consumer.rebalancing',
+        },
+        on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+          localHandlers[event] = handler;
+        }),
+        connect: jest.fn().mockRejectedValue(new Error('Broker unreachable')),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        subscribe: jest.fn().mockResolvedValue(undefined),
+        run: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          {
+            provide: KAFKAJS_INSTANCE,
+            useValue: { consumer: jest.fn().mockReturnValue(localConsumer) },
+          },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              health: { startupGracePeriodMs: 1 },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Simulate the fail-fast crash: CRASH with restart=false clears disconnectedAt.
+      localHandlers['consumer.crash']?.({
+        payload: { error: new Error('Non-retryable'), restart: false },
+      });
+      expect(localService.getHealthState().isHealthy).toBe(false);
+
+      // User code (or a test harness) retries connect() — it fails. The catch
+      // must NOT silently re-enable the grace period.
+      await expect(localService.connect()).rejects.toThrow('Broker unreachable');
+
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(false);
+      expect(health.reason).toBe('Consumer disconnected from broker');
+      expect(health.reason).not.toContain('Recovering from disconnect');
+      expect(health.reason).not.toContain('grace period');
+
+      await localModule.close();
+    });
   });
 
   describe('Configurable Grace Periods', () => {
