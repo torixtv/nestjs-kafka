@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-04-25
+
+### ✨ Added
+
+#### `health.disconnectGracePeriodMs` option (default 60s)
+
+The consumer health indicator now treats `DISCONNECTED` as a self-recovering state during a configurable grace window, mirroring the existing `STARTUP` and `REBALANCING` grace periods. This prevents Kubernetes liveness probes from killing pods during transient broker churn (Redpanda Serverless decommissions, leader transitions, etc.) where KafkaJS auto-reconnects in ~25–30s.
+
+- New field: `KafkaHealthOptions.disconnectGracePeriodMs` (default `60000`)
+- New default: `KafkaConsumerService.DEFAULT_DISCONNECT_GRACE_PERIOD_MS = 60000`
+- New health reason: `Recovering from disconnect (Xs / 60s max)` while within grace
+- New health reason: `Consumer disconnected from broker (exceeded grace period)` once grace elapses
+- Fail-fast crashes (`CRASH` with `restart=false`) bypass the grace period and report unhealthy immediately, preserving opt-out via `consumer.retry.restartOnFailure`
+
+### 🔄 Changed
+
+- `CRASH` events with `restart=true` no longer transition the consumer state to `REBALANCING`. The state now stays `DISCONNECTED` (semantically accurate) and the new `disconnectGracePeriodMs` provides the recovery window. Logs and external monitoring of `getState()` / `getHealthState().state` now correctly report `disconnected` during transient crash recovery instead of `rebalancing`.
+
+### 🐛 Fixed
+
+- ENG-593: Health indicator no longer flips to `down` for the full 25–30s KafkaJS auto-reconnect window after a transient broker disconnect, eliminating the root cause of pod restart loops in services with active consumer fetch sessions (e.g., `mux-gateway-service`).
+
 ## [0.2.2] - 2025-01-30
 
 ### 🚨 Breaking Changes

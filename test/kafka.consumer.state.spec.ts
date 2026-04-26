@@ -17,6 +17,7 @@ describe('KafkaConsumerService State Tracking', () => {
   const DEFAULT_STARTUP_GRACE_PERIOD_MS = 180000;      // 3 min
   const DEFAULT_REBALANCE_GRACE_PERIOD_MS = 120000;    // 2 min
   const DEFAULT_STALE_THRESHOLD_MS = 600000;           // 10 min
+  const DEFAULT_DISCONNECT_GRACE_PERIOD_MS = 60000;    // 60s
 
   describe('ConsumerState enum', () => {
     it('should have all expected states', () => {
@@ -40,6 +41,7 @@ describe('KafkaConsumerService State Tracking', () => {
       currentTime: number;
       lastPartitionAssignmentTime: number | null;
       rebalanceStartTime: number | null;
+      disconnectedAt?: number | null;
       assignedPartitionsCount: number;
     }): ConsumerHealthState {
       const {
@@ -48,6 +50,7 @@ describe('KafkaConsumerService State Tracking', () => {
         currentTime,
         lastPartitionAssignmentTime,
         rebalanceStartTime,
+        disconnectedAt = null,
         assignedPartitionsCount,
       } = options;
 
@@ -102,6 +105,21 @@ describe('KafkaConsumerService State Tracking', () => {
             reason: 'Consumer stale - no partitions assigned for extended period',
           };
         case ConsumerState.DISCONNECTED:
+          if (disconnectedAt) {
+            const disconnectDuration = currentTime - disconnectedAt;
+            if (disconnectDuration < DEFAULT_DISCONNECT_GRACE_PERIOD_MS) {
+              return {
+                state: currentState,
+                isHealthy: true,
+                reason: `Recovering from disconnect (${Math.round(disconnectDuration / 1000)}s / ${DEFAULT_DISCONNECT_GRACE_PERIOD_MS / 1000}s max)`,
+              };
+            }
+            return {
+              state: currentState,
+              isHealthy: false,
+              reason: 'Consumer disconnected from broker (exceeded grace period)',
+            };
+          }
           return {
             state: currentState,
             isHealthy: false,
@@ -294,6 +312,68 @@ describe('KafkaConsumerService State Tracking', () => {
         expect(result.reason).toContain('disconnected');
       });
     });
+
+    describe('Disconnect Grace Period', () => {
+      it('should report healthy when disconnected within grace period', () => {
+        const startupTime = Date.now() - 300000; // past startup grace
+        const disconnectedAt = Date.now() - 20000; // 20s ago
+        const currentTime = Date.now();
+
+        const result = simulateGetHealthState({
+          state: ConsumerState.DISCONNECTED,
+          startupTime,
+          currentTime,
+          lastPartitionAssignmentTime: null,
+          rebalanceStartTime: null,
+          disconnectedAt,
+          assignedPartitionsCount: 0,
+        });
+
+        expect(result.isHealthy).toBe(true);
+        expect(result.state).toBe(ConsumerState.DISCONNECTED);
+        expect(result.reason).toContain('Recovering from disconnect');
+        expect(result.reason).toContain('20s');
+        expect(result.reason).toContain('60s max');
+      });
+
+      it('should report unhealthy when disconnect exceeds grace period', () => {
+        const startupTime = Date.now() - 300000;
+        const disconnectedAt = Date.now() - 70000; // 70s ago, > 60s grace
+        const currentTime = Date.now();
+
+        const result = simulateGetHealthState({
+          state: ConsumerState.DISCONNECTED,
+          startupTime,
+          currentTime,
+          lastPartitionAssignmentTime: null,
+          rebalanceStartTime: null,
+          disconnectedAt,
+          assignedPartitionsCount: 0,
+        });
+
+        expect(result.isHealthy).toBe(false);
+        expect(result.reason).toContain('exceeded grace period');
+      });
+
+      it('should report unhealthy immediately when disconnectedAt is null (fail-fast crash)', () => {
+        const startupTime = Date.now() - 300000;
+        const currentTime = Date.now();
+
+        const result = simulateGetHealthState({
+          state: ConsumerState.DISCONNECTED,
+          startupTime,
+          currentTime,
+          lastPartitionAssignmentTime: null,
+          rebalanceStartTime: null,
+          disconnectedAt: null,
+          assignedPartitionsCount: 0,
+        });
+
+        expect(result.isHealthy).toBe(false);
+        expect(result.reason).toBe('Consumer disconnected from broker');
+        expect(result.reason).not.toContain('grace');
+      });
+    });
   });
 
   describe('Grace Period Constants', () => {
@@ -307,6 +387,10 @@ describe('KafkaConsumerService State Tracking', () => {
 
     it('should have appropriate stale threshold (10 minutes)', () => {
       expect(DEFAULT_STALE_THRESHOLD_MS).toBe(600000);
+    });
+
+    it('should have appropriate disconnect grace period (60 seconds)', () => {
+      expect(DEFAULT_DISCONNECT_GRACE_PERIOD_MS).toBe(60000);
     });
   });
 });
@@ -439,18 +523,23 @@ describe('KafkaConsumerService Integration', () => {
       expect(service.getAssignedPartitions()).toEqual([]);
     });
 
-    it('should enter REBALANCING grace period on CRASH with restart=true', () => {
+    it('should stay DISCONNECTED with disconnect grace period on CRASH with restart=true', () => {
       eventHandlers['consumer.connect']?.();
 
       eventHandlers['consumer.crash']?.({
         payload: { error: new Error('Test crash'), restart: true },
       });
 
-      // Should use REBALANCING state to leverage grace period while KafkaJS auto-restarts
-      expect(service.getState()).toBe(ConsumerState.REBALANCING);
+      // State stays DISCONNECTED but disconnectedAt is set, so the disconnect
+      // grace period applies and health stays green while KafkaJS reconnects.
+      expect(service.getState()).toBe(ConsumerState.DISCONNECTED);
+      // Health state is still healthy during startup grace at minimum; after
+      // startup grace expires, the disconnect grace would kick in.
+      const health = service.getHealthState();
+      expect(health.isHealthy).toBe(true);
     });
 
-    it('should transition to DISCONNECTED on CRASH with restart=false', () => {
+    it('should transition to DISCONNECTED on CRASH with restart=false (fail-fast)', () => {
       eventHandlers['consumer.connect']?.();
 
       eventHandlers['consumer.crash']?.({
@@ -530,6 +619,313 @@ describe('KafkaConsumerService Integration', () => {
     });
   });
 
+  describe('Disconnect Grace Period (with mocked consumer)', () => {
+    it('should report Recovering from disconnect after CRASH(restart=true) past startup grace', async () => {
+      // Build a service with a tiny startup grace period so we can exercise
+      // the post-startup disconnect grace path without real timers.
+      const localHandlers: Record<string, (...args: any[]) => void> = {};
+      const localConsumer = {
+        events: {
+          CONNECT: 'consumer.connect',
+          DISCONNECT: 'consumer.disconnect',
+          CRASH: 'consumer.crash',
+          GROUP_JOIN: 'consumer.group_join',
+          REBALANCING: 'consumer.rebalancing',
+        },
+        on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+          localHandlers[event] = handler;
+        }),
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        subscribe: jest.fn().mockResolvedValue(undefined),
+        run: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          {
+            provide: KAFKAJS_INSTANCE,
+            useValue: { consumer: jest.fn().mockReturnValue(localConsumer) },
+          },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              health: {
+                startupGracePeriodMs: 1, // expire startup grace immediately
+                disconnectGracePeriodMs: 60000,
+              },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+
+      // Wait past the 1ms startup grace period
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      localHandlers['consumer.connect']?.();
+      localHandlers['consumer.crash']?.({
+        payload: { error: new Error('Transient broker error'), restart: true },
+      });
+
+      const health = localService.getHealthState();
+      expect(localService.getState()).toBe(ConsumerState.DISCONNECTED);
+      expect(health.isHealthy).toBe(true);
+      expect(health.reason).toContain('Recovering from disconnect');
+      expect(health.reason).toContain('60s max');
+
+      await localModule.close();
+    });
+
+    it('should report unhealthy immediately after CRASH(restart=false) past startup grace', async () => {
+      const localHandlers: Record<string, (...args: any[]) => void> = {};
+      const localConsumer = {
+        events: {
+          CONNECT: 'consumer.connect',
+          DISCONNECT: 'consumer.disconnect',
+          CRASH: 'consumer.crash',
+          GROUP_JOIN: 'consumer.group_join',
+          REBALANCING: 'consumer.rebalancing',
+        },
+        on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+          localHandlers[event] = handler;
+        }),
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        subscribe: jest.fn().mockResolvedValue(undefined),
+        run: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          {
+            provide: KAFKAJS_INSTANCE,
+            useValue: { consumer: jest.fn().mockReturnValue(localConsumer) },
+          },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              health: { startupGracePeriodMs: 1 },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      localHandlers['consumer.connect']?.();
+      localHandlers['consumer.crash']?.({
+        payload: { error: new Error('Non-retryable'), restart: false },
+      });
+
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(false);
+      expect(health.reason).toBe('Consumer disconnected from broker');
+      expect(health.reason).not.toContain('grace period');
+
+      await localModule.close();
+    });
+
+    it('should report unhealthy after disconnect grace period expires', async () => {
+      const localHandlers: Record<string, (...args: any[]) => void> = {};
+      const localConsumer = {
+        events: {
+          CONNECT: 'consumer.connect',
+          DISCONNECT: 'consumer.disconnect',
+          CRASH: 'consumer.crash',
+          GROUP_JOIN: 'consumer.group_join',
+          REBALANCING: 'consumer.rebalancing',
+        },
+        on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+          localHandlers[event] = handler;
+        }),
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        subscribe: jest.fn().mockResolvedValue(undefined),
+        run: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          {
+            provide: KAFKAJS_INSTANCE,
+            useValue: { consumer: jest.fn().mockReturnValue(localConsumer) },
+          },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              health: {
+                startupGracePeriodMs: 1,
+                disconnectGracePeriodMs: 10, // 10ms so we can exceed it without long waits
+              },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      localHandlers['consumer.disconnect']?.();
+      // Wait past the 10ms disconnect grace
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(false);
+      expect(health.reason).toContain('exceeded grace period');
+
+      await localModule.close();
+    });
+
+    it('should clear disconnectedAt on CONNECT after a DISCONNECT', async () => {
+      const localHandlers: Record<string, (...args: any[]) => void> = {};
+      const localConsumer = {
+        events: {
+          CONNECT: 'consumer.connect',
+          DISCONNECT: 'consumer.disconnect',
+          CRASH: 'consumer.crash',
+          GROUP_JOIN: 'consumer.group_join',
+          REBALANCING: 'consumer.rebalancing',
+        },
+        on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+          localHandlers[event] = handler;
+        }),
+        connect: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        subscribe: jest.fn().mockResolvedValue(undefined),
+        run: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          {
+            provide: KAFKAJS_INSTANCE,
+            useValue: { consumer: jest.fn().mockReturnValue(localConsumer) },
+          },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              health: { startupGracePeriodMs: 1 },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      localHandlers['consumer.disconnect']?.();
+      // Sanity: grace period should be applied
+      expect(localService.getHealthState().reason).toContain('Recovering from disconnect');
+
+      // Reconnect
+      localHandlers['consumer.connect']?.();
+      expect(localService.getState()).toBe(ConsumerState.CONNECTED);
+
+      // Now disconnect again — the grace period should restart from this new
+      // disconnect timestamp, not carry over from the previous one.
+      localHandlers['consumer.disconnect']?.();
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(true);
+      expect(health.reason).toContain('Recovering from disconnect');
+      // Should be near 0s elapsed, definitely not exceeded grace
+      expect(health.reason).not.toContain('exceeded');
+
+      await localModule.close();
+    });
+
+    it('should preserve fail-fast when connect() is retried after CRASH(restart=false)', async () => {
+      // Regression test for the failure mode where connect() catch unconditionally
+      // set disconnectedAt, silently restoring the grace window and overriding the
+      // user's fail-fast opt-out via consumer.retry.restartOnFailure.
+      const localHandlers: Record<string, (...args: any[]) => void> = {};
+      const localConsumer = {
+        events: {
+          CONNECT: 'consumer.connect',
+          DISCONNECT: 'consumer.disconnect',
+          CRASH: 'consumer.crash',
+          GROUP_JOIN: 'consumer.group_join',
+          REBALANCING: 'consumer.rebalancing',
+        },
+        on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+          localHandlers[event] = handler;
+        }),
+        connect: jest.fn().mockRejectedValue(new Error('Broker unreachable')),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        subscribe: jest.fn().mockResolvedValue(undefined),
+        run: jest.fn().mockResolvedValue(undefined),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          {
+            provide: KAFKAJS_INSTANCE,
+            useValue: { consumer: jest.fn().mockReturnValue(localConsumer) },
+          },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              health: { startupGracePeriodMs: 1 },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Simulate the fail-fast crash: CRASH with restart=false clears disconnectedAt.
+      localHandlers['consumer.crash']?.({
+        payload: { error: new Error('Non-retryable'), restart: false },
+      });
+      expect(localService.getHealthState().isHealthy).toBe(false);
+
+      // User code (or a test harness) retries connect() — it fails. The catch
+      // must NOT silently re-enable the grace period.
+      await expect(localService.connect()).rejects.toThrow('Broker unreachable');
+
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(false);
+      expect(health.reason).toBe('Consumer disconnected from broker');
+      expect(health.reason).not.toContain('Recovering from disconnect');
+      expect(health.reason).not.toContain('grace period');
+
+      await localModule.close();
+    });
+  });
+
   describe('Configurable Grace Periods', () => {
     it('should use custom grace periods from options', async () => {
       // Create a new module with custom health options
@@ -548,6 +944,7 @@ describe('KafkaConsumerService Integration', () => {
                 startupGracePeriodMs: 60000, // 1 minute
                 rebalanceGracePeriodMs: 30000, // 30 seconds
                 staleThresholdMs: 300000, // 5 minutes
+                disconnectGracePeriodMs: 45000, // 45 seconds
               },
             },
           },

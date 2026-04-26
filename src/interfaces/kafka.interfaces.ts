@@ -67,6 +67,18 @@ export interface KafkaHealthOptions {
    * Default: 600000 (10 minutes)
    */
   staleThresholdMs?: number;
+
+  /**
+   * Grace period after a transient disconnect before reporting unhealthy.
+   * Applies when KafkaJS auto-restarts after a CRASH (restart=true) or after
+   * an unexpected DISCONNECT — the consumer typically self-recovers in
+   * 25–30s, so a short grace period prevents Kubernetes from killing pods
+   * mid-recovery. Set the timestamp via the disconnect/crash event handlers
+   * and clear it on (re)connect. Fail-fast crashes (restart=false) bypass
+   * this grace period and report unhealthy immediately.
+   * Default: 60000 (60 seconds)
+   */
+  disconnectGracePeriodMs?: number;
 }
 
 export interface KafkaModuleOptions {
