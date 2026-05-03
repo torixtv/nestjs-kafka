@@ -77,11 +77,21 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly staleThresholdMs: number;
   private readonly disconnectGracePeriodMs: number;
 
+  // Manual reconnect after non-restartable CRASH (kafkajs `payload.restart === false`)
+  private readonly manualReconnectEnabled: boolean;
+  private readonly manualReconnectMaxAttempts: number;
+  private readonly manualReconnectBaseDelayMs: number;
+  private readonly manualReconnectMaxDelayMs: number;
+  private manualReconnectInProgress = false;
+
   // Default grace period values
   private static readonly DEFAULT_STARTUP_GRACE_PERIOD_MS = 180000;      // 3 min after startup
   private static readonly DEFAULT_REBALANCE_GRACE_PERIOD_MS = 120000;    // 2 min during rebalance
   private static readonly DEFAULT_STALE_THRESHOLD_MS = 600000;           // 10 min without partitions = stale
   private static readonly DEFAULT_DISCONNECT_GRACE_PERIOD_MS = 60000;    // 60s for transient disconnect recovery
+  private static readonly DEFAULT_MANUAL_RECONNECT_MAX_ATTEMPTS = 5;
+  private static readonly DEFAULT_MANUAL_RECONNECT_BASE_DELAY_MS = 1000;  // 1s
+  private static readonly DEFAULT_MANUAL_RECONNECT_MAX_DELAY_MS = 30000;  // 30s
 
   constructor(
     @Inject(KAFKAJS_INSTANCE) private readonly kafka: Kafka,
@@ -104,6 +114,15 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       ?? KafkaConsumerService.DEFAULT_STALE_THRESHOLD_MS;
     this.disconnectGracePeriodMs = this.options.health?.disconnectGracePeriodMs
       ?? KafkaConsumerService.DEFAULT_DISCONNECT_GRACE_PERIOD_MS;
+
+    const manualReconnect = this.options.health?.manualReconnect;
+    this.manualReconnectEnabled = manualReconnect?.enabled ?? false;
+    this.manualReconnectMaxAttempts = manualReconnect?.maxAttempts
+      ?? KafkaConsumerService.DEFAULT_MANUAL_RECONNECT_MAX_ATTEMPTS;
+    this.manualReconnectBaseDelayMs = manualReconnect?.baseDelayMs
+      ?? KafkaConsumerService.DEFAULT_MANUAL_RECONNECT_BASE_DELAY_MS;
+    this.manualReconnectMaxDelayMs = manualReconnect?.maxDelayMs
+      ?? KafkaConsumerService.DEFAULT_MANUAL_RECONNECT_MAX_DELAY_MS;
 
     this.consumer = this.kafka.consumer(this.options.consumer);
     this.setupConsumerEventListeners();
@@ -138,7 +157,14 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.consumer.on(CRASH, async ({ payload }) => {
-      this.logger.error('Consumer crashed', { error: payload.error, restart: payload.restart });
+      // Use the message-then-stack signature for the underlying error so the
+      // stack trace is preserved by NestJS Logger. The {error,restart} object
+      // form would be stringified to `[object Object]` by NestJS Logger, which
+      // is why earlier crash investigations had no error details in pino logs.
+      this.logger.error(
+        `Consumer crashed (restart=${payload.restart})`,
+        payload.error?.stack ?? String(payload.error),
+      );
       this.isConnected = false;
       this.assignedPartitions = [];
       this.state = ConsumerState.DISCONNECTED;
@@ -151,12 +177,27 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
         // killing the pod mid-recovery.
         this.disconnectedAt = Date.now();
         this.logger.warn('KafkaJS will auto-restart consumer, entering disconnect grace period');
-      } else {
-        // KafkaJS decided not to restart. Preserve fail-fast behavior so
-        // services can opt out via consumer.retry.restartOnFailure — leave
-        // disconnectedAt null so the grace period does not apply.
-        this.disconnectedAt = null;
+        return;
       }
+
+      // KafkaJS declined to auto-restart. Two paths:
+      //   1) `manualReconnect.enabled === false` (default): preserve fail-fast
+      //      behavior — leave disconnectedAt null so health checks flip
+      //      unhealthy and Kubernetes can restart the pod.
+      //   2) `manualReconnect.enabled === true`: tear down the dead consumer
+      //      and rebuild it in-process. This recovers from transient broker
+      //      conditions (e.g. Redpanda Serverless leader election returning
+      //      BROKER_NOT_AVAILABLE) that kafkajs classifies non-retriable but
+      //      that resolve in seconds. We start the disconnect grace period so
+      //      readiness probes stay green while reconnect runs.
+      if (!this.manualReconnectEnabled) {
+        this.disconnectedAt = null;
+        return;
+      }
+
+      this.disconnectedAt = Date.now();
+      // Fire-and-forget — we mustn't block the kafkajs CRASH listener.
+      void this.attemptManualReconnect(payload.error);
     });
 
     this.consumer.on(GROUP_JOIN, ({ payload }) => {
@@ -184,6 +225,91 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.rebalanceStartTime = Date.now();
       // Note: We don't clear assignedPartitions here to preserve last known state for logging
     });
+  }
+
+  /**
+   * Recover from a non-restartable CRASH by tearing down the dead kafkajs
+   * Consumer instance and building a new one. Subscribes, runs, and resumes
+   * message consumption. Retries with exponential backoff up to
+   * `manualReconnectMaxAttempts`; if all attempts fail, clears the disconnect
+   * grace period so the readiness probe flips unhealthy and Kubernetes can
+   * restart the pod.
+   *
+   * Concurrent invocations are skipped via the `manualReconnectInProgress`
+   * latch — useful because a flapping broker can re-emit CRASH while we are
+   * mid-reconnect on the new consumer instance.
+   *
+   * Internal helper for the CRASH handler. Not part of the public API.
+   */
+  private async attemptManualReconnect(originalError: Error | undefined): Promise<void> {
+    if (this.manualReconnectInProgress) {
+      this.logger.warn('Manual reconnect already in progress, skipping duplicate trigger');
+      return;
+    }
+    this.manualReconnectInProgress = true;
+
+    this.logger.warn(
+      `KafkaJS declined to restart consumer (${originalError?.name ?? 'unknown error'}: ${originalError?.message ?? ''}). ` +
+        `Attempting manual reconnect (max ${this.manualReconnectMaxAttempts} attempts).`,
+    );
+
+    try {
+      for (let attempt = 1; attempt <= this.manualReconnectMaxAttempts; attempt++) {
+        try {
+          // Tear down the dead consumer. kafkajs's internal state machine has
+          // already stopped it; this is best-effort cleanup of sockets/timers.
+          await this.consumer.disconnect().catch(() => {
+            // ignore — already-stopped consumer often throws on disconnect
+          });
+
+          // Recreate the consumer instance. kafkajs.consumer() with the same
+          // config produces a fresh state machine; the previous one is
+          // unreferenced after this assignment.
+          this.consumer = this.kafka.consumer(this.options.consumer!);
+          this.setupConsumerEventListeners();
+          this.isConnected = false;
+          this.state = ConsumerState.CONNECTING;
+
+          // Refresh the disconnect grace window for each attempt so readiness
+          // probes stay green across retries.
+          this.disconnectedAt = Date.now();
+
+          await this.connect();
+          await this.subscribe();
+          await this.startConsumer();
+
+          this.logger.log(`Manual reconnect succeeded on attempt ${attempt}`);
+          return;
+        } catch (err) {
+          const isFinalAttempt = attempt === this.manualReconnectMaxAttempts;
+          if (isFinalAttempt) {
+            throw err;
+          }
+
+          const delayMs = Math.min(
+            this.manualReconnectBaseDelayMs * 2 ** (attempt - 1),
+            this.manualReconnectMaxDelayMs,
+          );
+          const errMessage = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `Manual reconnect attempt ${attempt}/${this.manualReconnectMaxAttempts} failed: ${errMessage}. ` +
+              `Retrying in ${delayMs}ms.`,
+          );
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    } catch (err) {
+      // All attempts exhausted — open the gate for Kubernetes to take over.
+      const errStack = err instanceof Error ? err.stack : String(err);
+      this.logger.error(
+        `Manual reconnect exhausted after ${this.manualReconnectMaxAttempts} attempts; ` +
+          `clearing disconnect grace period so Kubernetes can restart the pod.`,
+        errStack,
+      );
+      this.disconnectedAt = null;
+    } finally {
+      this.manualReconnectInProgress = false;
+    }
   }
 
   /**

@@ -991,4 +991,204 @@ describe('KafkaConsumerService Integration', () => {
       expect(stateBefore).toBe(stateAfter);
     });
   });
+
+  describe('Manual reconnect after non-restartable CRASH', () => {
+    /**
+     * Build a fresh module with manualReconnect.enabled true and a kafka mock
+     * that returns a *new* mock consumer on every `kafka.consumer()` call so
+     * we can observe the rebuild-the-consumer behavior of the service.
+     *
+     * Returns the service plus the array of mock consumers and the array of
+     * eventHandlers maps (one per consumer instance). Index 0 is the consumer
+     * created in the constructor; subsequent indices are reconnect rebuilds.
+     */
+    async function buildManualReconnectHarness(opts?: {
+      maxAttempts?: number;
+      baseDelayMs?: number;
+      maxDelayMs?: number;
+      consumerConnectFailures?: number; // how many connect() calls should reject
+      enabled?: boolean;
+    }) {
+      const consumers: any[] = [];
+      const handlersByConsumer: Array<Record<string, (...args: any[]) => void>> = [];
+      let connectFailuresRemaining = opts?.consumerConnectFailures ?? 0;
+
+      const makeMockConsumer = () => {
+        const localHandlers: Record<string, (...args: any[]) => void> = {};
+        handlersByConsumer.push(localHandlers);
+        const mc = {
+          events: {
+            CONNECT: 'consumer.connect',
+            DISCONNECT: 'consumer.disconnect',
+            CRASH: 'consumer.crash',
+            GROUP_JOIN: 'consumer.group_join',
+            REBALANCING: 'consumer.rebalancing',
+          },
+          on: jest.fn((event: string, handler: (...args: any[]) => void) => {
+            localHandlers[event] = handler;
+          }),
+          connect: jest.fn().mockImplementation(async () => {
+            if (connectFailuresRemaining > 0) {
+              connectFailuresRemaining -= 1;
+              throw new Error('Simulated connect failure');
+            }
+          }),
+          disconnect: jest.fn().mockResolvedValue(undefined),
+          subscribe: jest.fn().mockResolvedValue(undefined),
+          run: jest.fn().mockResolvedValue(undefined),
+        };
+        consumers.push(mc);
+        return mc;
+      };
+
+      const mockKafka = {
+        consumer: jest.fn().mockImplementation(() => makeMockConsumer()),
+      };
+
+      const localModule = await Test.createTestingModule({
+        providers: [
+          KafkaConsumerService,
+          { provide: KAFKAJS_INSTANCE, useValue: mockKafka },
+          {
+            provide: KAFKA_MODULE_OPTIONS,
+            useValue: {
+              consumer: { groupId: 'test-group' },
+              subscriptions: { topics: ['test-topic'] },
+              health: {
+                startupGracePeriodMs: 1, // bypass startup grace immediately
+                disconnectGracePeriodMs: 60000,
+                manualReconnect: {
+                  enabled: opts?.enabled ?? true,
+                  maxAttempts: opts?.maxAttempts ?? 3,
+                  baseDelayMs: opts?.baseDelayMs ?? 1, // 1ms — keep tests fast
+                  maxDelayMs: opts?.maxDelayMs ?? 4,
+                },
+              },
+            },
+          },
+          { provide: KafkaHandlerRegistry, useValue: { getHandlerByTopic: jest.fn() } },
+          { provide: KafkaRetryService, useValue: { getRetryTopicName: jest.fn() } },
+          { provide: KafkaDlqService, useValue: { storeToDlq: jest.fn() } },
+          { provide: KafkaProducerService, useValue: { send: jest.fn() } },
+        ],
+      }).compile();
+
+      const localService = localModule.get<KafkaConsumerService>(KafkaConsumerService);
+      // Wait past the 1ms startup grace period.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { localService, localModule, consumers, handlersByConsumer, mockKafka };
+    }
+
+    it('preserves fail-fast behavior when manualReconnect is not configured', async () => {
+      // Build a fresh harness with a 1ms startup grace and *no* manualReconnect
+      // config — same shape as buildManualReconnectHarness but with enabled:false.
+      const { localService, localModule, mockKafka, handlersByConsumer } =
+        await buildManualReconnectHarness({ enabled: false });
+
+      handlersByConsumer[0]['consumer.crash']?.({
+        payload: { error: new Error('BROKER_NOT_AVAILABLE'), restart: false },
+      });
+
+      // Give any (unwanted) reconnect chain a chance to run.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // No second consumer instance was created — fail-fast preserved.
+      expect(mockKafka.consumer).toHaveBeenCalledTimes(1);
+
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(false);
+      expect(health.reason).toBe('Consumer disconnected from broker');
+
+      await localModule.close();
+    });
+
+    it('rebuilds the kafkajs consumer when manualReconnect is enabled', async () => {
+      const { localService, localModule, consumers, handlersByConsumer, mockKafka } =
+        await buildManualReconnectHarness();
+
+      // Sanity: only the constructor-time consumer exists.
+      expect(consumers).toHaveLength(1);
+      expect(mockKafka.consumer).toHaveBeenCalledTimes(1);
+
+      // Trigger a non-restartable crash on the first consumer.
+      handlersByConsumer[0]['consumer.crash']?.({
+        payload: { error: new Error('BROKER_NOT_AVAILABLE'), restart: false },
+      });
+
+      // Wait for the async reconnect chain to settle.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // A second consumer instance was created and brought up.
+      expect(mockKafka.consumer).toHaveBeenCalledTimes(2);
+      expect(consumers[1].connect).toHaveBeenCalled();
+      expect(consumers[1].subscribe).toHaveBeenCalledWith({ topic: 'test-topic', fromBeginning: false });
+      expect(consumers[1].run).toHaveBeenCalled();
+
+      // After successful reconnect, connect() clears disconnectedAt and the
+      // service is back in CONNECTED state. Healthy.
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(true);
+      expect(localService.getState()).toBe(ConsumerState.CONNECTED);
+
+      await localModule.close();
+    });
+
+    it('retries with backoff and eventually succeeds when first connect attempts fail', async () => {
+      const { localService, localModule, consumers, handlersByConsumer, mockKafka } =
+        await buildManualReconnectHarness({
+          maxAttempts: 3,
+          consumerConnectFailures: 2, // first two reconnect connect()s reject
+        });
+
+      handlersByConsumer[0]['consumer.crash']?.({
+        payload: { error: new Error('BROKER_NOT_AVAILABLE'), restart: false },
+      });
+
+      // Allow time for retries with 1ms/2ms backoff.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // 1 (initial) + 3 (reconnect attempts) = 4 consumer instances created.
+      expect(mockKafka.consumer).toHaveBeenCalledTimes(4);
+
+      // Final consumer connected and started.
+      const last = consumers[consumers.length - 1];
+      expect(last.connect).toHaveBeenCalled();
+      expect(last.subscribe).toHaveBeenCalled();
+      expect(last.run).toHaveBeenCalled();
+
+      // Service is back in a healthy/connecting state.
+      expect(localService.getState()).not.toBe(ConsumerState.DISCONNECTED);
+
+      await localModule.close();
+    });
+
+    it('clears disconnect grace and reports unhealthy after exhausting reconnect attempts', async () => {
+      const { localService, localModule, mockKafka } = await buildManualReconnectHarness({
+        maxAttempts: 2,
+        consumerConnectFailures: 999, // every reconnect fails
+      });
+
+      // Reach into the first consumer's CRASH handler via mock.consumer.mock.results[0].value
+      const firstConsumer = mockKafka.consumer.mock.results[0].value;
+      // Find the CRASH handler the service registered.
+      const crashHandler = (firstConsumer.on as jest.Mock).mock.calls.find(
+        (c: any[]) => c[0] === 'consumer.crash',
+      )![1];
+
+      crashHandler({
+        payload: { error: new Error('BROKER_NOT_AVAILABLE'), restart: false },
+      });
+
+      // Allow all 2 attempts to run and fail.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const health = localService.getHealthState();
+      expect(health.isHealthy).toBe(false);
+      // The service should NOT report itself in the recovering grace window
+      // anymore — it has cleared disconnectedAt.
+      expect(health.reason).not.toContain('Recovering from disconnect');
+
+      await localModule.close();
+    });
+  });
 });
