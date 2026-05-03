@@ -74,11 +74,68 @@ export interface KafkaHealthOptions {
    * an unexpected DISCONNECT — the consumer typically self-recovers in
    * 25–30s, so a short grace period prevents Kubernetes from killing pods
    * mid-recovery. Set the timestamp via the disconnect/crash event handlers
-   * and clear it on (re)connect. Fail-fast crashes (restart=false) bypass
-   * this grace period and report unhealthy immediately.
+   * and clear it on (re)connect.
+   *
+   * Also applies during a manual reconnect after a non-restartable CRASH
+   * (see `manualReconnect`). Fail-fast crashes with `manualReconnect`
+   * disabled bypass this grace period and report unhealthy immediately.
    * Default: 60000 (60 seconds)
    */
   disconnectGracePeriodMs?: number;
+
+  /**
+   * Manual reconnect behavior after a CRASH where KafkaJS declined to
+   * auto-restart (`payload.restart === false`). Without this, the consumer
+   * stays dead until Kubernetes kills the pod — which is the desired
+   * fail-fast behavior for genuine fatal errors, but problematic when
+   * KafkaJS classifies transient broker hiccups (e.g. Redpanda Serverless
+   * leader elections returning BROKER_NOT_AVAILABLE) as non-retriable.
+   *
+   * Note that the consumer's `retry.restartOnFailure` callback in kafkajs
+   * 2.x is only consulted for already-retriable errors, so it cannot help
+   * with this class of crash — manual reconnect is the only way to recover
+   * in-process.
+   *
+   * When enabled, the service tears down the dead kafkajs Consumer
+   * instance, creates a new one, re-subscribes, and resumes consumption —
+   * with exponential backoff between attempts. The disconnect grace period
+   * applies while reconnect is in progress so health checks stay healthy.
+   *
+   * Default: disabled (preserves prior fail-fast semantics).
+   */
+  manualReconnect?: KafkaManualReconnectOptions;
+}
+
+/**
+ * Configuration for manual consumer recovery after a non-restartable CRASH.
+ * See `KafkaHealthOptions.manualReconnect`.
+ */
+export interface KafkaManualReconnectOptions {
+  /**
+   * Enable manual reconnect when KafkaJS emits CRASH with `restart=false`.
+   * Default: false
+   */
+  enabled?: boolean;
+
+  /**
+   * Maximum number of reconnect attempts before giving up and letting the
+   * pod be restarted by Kubernetes.
+   * Default: 5
+   */
+  maxAttempts?: number;
+
+  /**
+   * Initial delay between reconnect attempts (milliseconds). Each subsequent
+   * attempt doubles this delay, capped at `maxDelayMs`.
+   * Default: 1000 (1 second)
+   */
+  baseDelayMs?: number;
+
+  /**
+   * Maximum delay between reconnect attempts (milliseconds).
+   * Default: 30000 (30 seconds)
+   */
+  maxDelayMs?: number;
 }
 
 export interface KafkaModuleOptions {

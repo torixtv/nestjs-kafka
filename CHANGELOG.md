@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-03
+
+### ✨ Added
+
+#### `health.manualReconnect` option — recover from non-restartable consumer crashes
+
+KafkaJS 2.x consults `consumer.retry.restartOnFailure` only for *already-retriable* errors (the `&&` gate at `node_modules/kafkajs/src/consumer/index.js:267-289`). Crashes wrapped as `KafkaJSNonRetriableError` — including transient `BROKER_NOT_AVAILABLE` from Redpanda Serverless leader elections — bypass that callback entirely and emit `CRASH` with `payload.restart === false`. Until now, the only recovery path was a Kubernetes pod restart.
+
+The new `KafkaHealthOptions.manualReconnect` makes `KafkaConsumerService` rebuild the dead `kafkajs` Consumer instance in-process — disconnecting the old one, creating a new one, re-subscribing, and resuming consumption — with exponential backoff between attempts. The disconnect grace period applies while reconnect runs, so readiness probes stay green.
+
+```typescript
+KafkaModule.forRootAsync({
+  useFactory: () => ({
+    consumer: { groupId: 'my-service-group' /* ... */ },
+    health: {
+      manualReconnect: {
+        enabled: true,        // default: false (preserves prior fail-fast)
+        maxAttempts: 5,       // default: 5
+        baseDelayMs: 1000,    // default: 1000 (1s)
+        maxDelayMs: 30000,    // default: 30000 (30s)
+      },
+    },
+  }),
+});
+```
+
+- New interface: `KafkaManualReconnectOptions`
+- New field: `KafkaHealthOptions.manualReconnect`
+- New defaults: `DEFAULT_MANUAL_RECONNECT_MAX_ATTEMPTS = 5`, `DEFAULT_MANUAL_RECONNECT_BASE_DELAY_MS = 1000`, `DEFAULT_MANUAL_RECONNECT_MAX_DELAY_MS = 30000`
+- Concurrent reconnect triggers are coalesced via an internal `manualReconnectInProgress` latch.
+- When all attempts fail, `disconnectedAt` is cleared so the readiness probe flips unhealthy and Kubernetes can restart the pod (final fallback).
+
+### 🐛 Fixed
+
+- The `CRASH` handler's error log was using the NestJS `Logger.error(message, traceObject)` shape, so the `{ error, restart }` metadata was being stringified to `[object Object]` and lost in pino output. The new format passes the underlying error's `stack` as the trace, surfacing the `KafkaJSNonRetriableError` details (and its message) in production logs for the first time.
+
 ## [0.3.3] - 2026-04-25
 
 ### ✨ Added
