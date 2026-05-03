@@ -83,6 +83,7 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly manualReconnectBaseDelayMs: number;
   private readonly manualReconnectMaxDelayMs: number;
   private manualReconnectInProgress = false;
+  private manualReconnectAbort = false;
 
   // Default grace period values
   private static readonly DEFAULT_STARTUP_GRACE_PERIOD_MS = 180000;      // 3 min after startup
@@ -153,7 +154,15 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
       this.isConnected = false;
       this.state = ConsumerState.DISCONNECTED;
       this.assignedPartitions = [];
-      this.disconnectedAt = Date.now();
+      // During a manual reconnect the loop tears down the old consumer with
+      // `consumer.disconnect()`, which fires this listener while we are
+      // mid-rebuild. The reconnect path manages disconnectedAt itself; if we
+      // also wrote here we could clobber the new consumer's freshly-cleared
+      // grace window if KafkaJS's emission timing ever shifts. Skip when
+      // manual reconnect is in flight.
+      if (!this.manualReconnectInProgress) {
+        this.disconnectedAt = Date.now();
+      }
     });
 
     this.consumer.on(CRASH, async ({ payload }) => {
@@ -255,6 +264,12 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
 
     try {
       for (let attempt = 1; attempt <= this.manualReconnectMaxAttempts; attempt++) {
+        // Bail out if the module is being torn down — avoids racing
+        // kafka.consumer() against onModuleDestroy's disconnect.
+        if (this.manualReconnectAbort) {
+          this.logger.log('Manual reconnect aborted (module destroying)');
+          return;
+        }
         try {
           // Tear down the dead consumer. kafkajs's internal state machine has
           // already stopped it; this is best-effort cleanup of sockets/timers.
@@ -295,7 +310,8 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
             `Manual reconnect attempt ${attempt}/${this.manualReconnectMaxAttempts} failed: ${errMessage}. ` +
               `Retrying in ${delayMs}ms.`,
           );
-          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          // Wake early if module destruction signals abort during the backoff.
+          await this.sleepUnlessAborted(delayMs);
         }
       }
     } catch (err) {
@@ -310,6 +326,33 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.manualReconnectInProgress = false;
     }
+  }
+
+  /**
+   * Sleep for `ms` milliseconds, returning early if `manualReconnectAbort`
+   * is set. Used between reconnect attempts so a shutdown doesn't have to
+   * wait out the full backoff before the loop bails on abort.
+   */
+  private sleepUnlessAborted(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const start = Date.now();
+      const tick = (): void => {
+        if (this.manualReconnectAbort) {
+          resolve();
+          return;
+        }
+        const remaining = ms - (Date.now() - start);
+        if (remaining <= 0) {
+          resolve();
+          return;
+        }
+        // Poll at 50ms or the remaining time, whichever is smaller. 50ms is
+        // small enough that shutdown stays responsive but large enough that
+        // we don't burn CPU during a 30s backoff.
+        setTimeout(tick, Math.min(50, remaining));
+      };
+      tick();
+    });
   }
 
   /**
@@ -419,8 +462,11 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
         };
       case ConsumerState.DISCONNECTED:
         // Apply disconnect grace period for transient disconnects with auto-restart.
-        // disconnectedAt is set on DISCONNECT, CRASH(restart=true), and connect() failure;
-        // it stays null on CRASH(restart=false) to preserve fail-fast semantics.
+        // disconnectedAt is set on DISCONNECT, CRASH(restart=true), and during a
+        // CRASH(restart=false) when manualReconnect is enabled (so the grace
+        // window covers the in-process reconnect attempts). It stays null on
+        // CRASH(restart=false) when manualReconnect is disabled, preserving
+        // fail-fast semantics.
         if (this.disconnectedAt) {
           const disconnectDuration = now - this.disconnectedAt;
           if (disconnectDuration < this.disconnectGracePeriodMs) {
@@ -475,6 +521,10 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    // Signal any in-flight manual reconnect to abort before its next iteration
+    // so we don't race kafka.consumer() against the shutdown disconnect, leak
+    // half-built consumer instances, or fight the parent context's teardown.
+    this.manualReconnectAbort = true;
     if (this.isConnected) {
       await this.disconnect();
     }

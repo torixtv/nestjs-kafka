@@ -1162,6 +1162,41 @@ describe('KafkaConsumerService Integration', () => {
       await localModule.close();
     });
 
+    it('aborts in-flight reconnect when onModuleDestroy fires', async () => {
+      const { localService, localModule, mockKafka } = await buildManualReconnectHarness({
+        maxAttempts: 5,
+        consumerConnectFailures: 999, // every reconnect would otherwise fail
+        baseDelayMs: 50,
+        maxDelayMs: 50,
+      });
+
+      const firstConsumer = mockKafka.consumer.mock.results[0].value;
+      const crashHandler = (firstConsumer.on as jest.Mock).mock.calls.find(
+        (c: any[]) => c[0] === 'consumer.crash',
+      )![1];
+
+      crashHandler({
+        payload: { error: new Error('BROKER_NOT_AVAILABLE'), restart: false },
+      });
+
+      // Let one or two attempts run, then trigger module destruction.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const callsBeforeDestroy = mockKafka.consumer.mock.calls.length;
+
+      await localService.onModuleDestroy();
+
+      // Give the loop a chance to finish iterating and observe the abort flag.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const callsAfterDestroy = mockKafka.consumer.mock.calls.length;
+      // After destroy, no more reconnect rebuilds should occur.
+      expect(callsAfterDestroy - callsBeforeDestroy).toBeLessThanOrEqual(1);
+      // And we never hit the full maxAttempts (which is 5) — the abort cut us short.
+      expect(callsAfterDestroy).toBeLessThan(1 + 5);
+
+      await localModule.close();
+    });
+
     it('clears disconnect grace and reports unhealthy after exhausting reconnect attempts', async () => {
       const { localService, localModule, mockKafka } = await buildManualReconnectHarness({
         maxAttempts: 2,
