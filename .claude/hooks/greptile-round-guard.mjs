@@ -12,6 +12,8 @@
 //       path allows it. When GitHub cannot be read it allows the call and says so: the written
 //       rules still apply.
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const GREPTILE_LOGIN = 'greptile-apps[bot]';
@@ -19,6 +21,8 @@ export const GREPTILE_CHECK = 'Greptile Review';
 export const SKIP_LABEL = 'skip-greptile';
 export const EXTRA_ROUND_LABEL = 'greptile-extra-round';
 export const ROUND_LIMIT = 3;
+const CI_GRACE_MS = 15 * 60 * 1000; // how long a fresh head may show no CI before none is assumed
+const REQUEST_WAIT_MS = 30 * 60 * 1000; // how long an unstarted request counts as pending
 
 const FAILED = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale']);
 const COMMENT_TOOLS = /(add_issue_comment|add_reply_to_pull_request_comment|update_issue_comment|add_comment_to_pending_review|pull_request_review_write)$/;
@@ -58,7 +62,7 @@ const sameCommit = (a, b) => Boolean(a && b) && (a.startsWith(b) || b.startsWith
  * Decides whether a new round may be requested. Pure: `state` holds the PR, its head check runs,
  * the parsed summary (or null) and the unanswered thread count.
  */
-export function decide({ pr, checks, summary, unanswered }) {
+export function decide({ pr, checks, summary, unanswered, pendingRequest = false, headAgeMs = null }) {
   const reasons = [];
   const labels = pr.labels ?? [];
   if (pr.state !== 'open') return { verdict: 'blocked', reasons: ['the PR is not open'] };
@@ -77,6 +81,11 @@ export function decide({ pr, checks, summary, unanswered }) {
   if (red.length) reasons.push(`CI is red: ${[...new Set(red)].join(', ')}`);
   if (running.length) reasons.push(`CI is still running: ${[...new Set(running)].join(', ')}`);
   if (unanswered > 0) reasons.push(`${unanswered} Greptile thread(s) have no reply`);
+  if (pendingRequest) reasons.push('a request is already waiting for Greptile to start: give it a few minutes');
+  // Right after a push no check run exists yet, and an empty list is not a green one.
+  if (ci.length === 0 && headAgeMs !== null && headAgeMs < CI_GRACE_MS) {
+    reasons.push('no CI has reported on the head commit yet: wait for it');
+  }
   if (!summary && greptile.length === 0) {
     reasons.push('Greptile has not posted its first review yet: marking the PR ready starts round 1, so wait for it');
   }
@@ -111,7 +120,7 @@ function pages(api, path, max = 5) {
   return out;
 }
 
-export function gather(repo, number, api = ghApi) {
+export function gather(repo, number, api = ghApi, now = Date.now()) {
   const raw = api(`repos/${repo}/pulls/${number}`);
   const pr = {
     state: raw.state,
@@ -123,6 +132,7 @@ export function gather(repo, number, api = ghApi) {
     name: c.name,
     status: c.status,
     conclusion: c.conclusion,
+    startedAt: c.started_at,
   }));
   // Some CI reports through commit statuses instead (Terraform Cloud, for one): count them too.
   for (const st of api(`repos/${repo}/commits/${pr.headSha}/status`).statuses ?? []) {
@@ -136,8 +146,36 @@ export function gather(repo, number, api = ghApi) {
   const summaryComment = comments
     .filter((c) => c.user?.login === GREPTILE_LOGIN && /Confidence Score/i.test(c.body ?? ''))
     .at(-1);
+  // No summary and no Greptile check on the head: either the first review has not started, or it
+  // ran on an earlier commit and posted nothing. Pushes start no review, so look back before
+  // telling anyone to wait for one.
+  if (!summaryComment && !checks.some((c) => c.name === GREPTILE_CHECK)) {
+    const shas = api(`repos/${repo}/pulls/${number}/commits?per_page=100`).map((c) => c.sha).filter((sha) => sha !== pr.headSha);
+    for (const sha of shas.slice(-10).reverse()) {
+      const earlier = api(`repos/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent(GREPTILE_CHECK)}`).check_runs ?? [];
+      if (earlier.length) {
+        checks.push(...earlier.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion })));
+        break;
+      }
+    }
+  }
   const threads = unansweredThreads(pages(api, `repos/${repo}/pulls/${number}/comments`));
-  return { pr, checks, summary: parseSummary(summaryComment?.body), unanswered: threads.length, threads };
+  // A request someone already posted, newer than the last review and not yet picked up by a
+  // Greptile check, is pending: asking again would only queue a second paid round.
+  const lastReview = Date.parse(summaryComment?.updated_at ?? summaryComment?.created_at ?? 0) || 0;
+  const started = checks.filter((c) => c.name === GREPTILE_CHECK).map((c) => Date.parse(c.startedAt ?? 0) || 0);
+  const pendingRequest = comments.some((c) => {
+    const at = Date.parse(c.created_at ?? 0) || 0;
+    return c.user?.type !== 'Bot' && mentionsGreptile(c.body) && at > lastReview && now - at < REQUEST_WAIT_MS && !started.some((t) => t >= at);
+  });
+  let headAgeMs = null;
+  try {
+    const date = api(`repos/${repo}/commits/${pr.headSha}`).commit?.committer?.date;
+    if (date) headAgeMs = now - Date.parse(date);
+  } catch {
+    // Unknown age: fall back to the check list alone.
+  }
+  return { pr, checks, summary: parseSummary(summaryComment?.body), unanswered: threads.length, threads, pendingRequest, headAgeMs };
 }
 
 // --- Locating the PR a tool call targets -------------------------------------------------------
@@ -156,19 +194,34 @@ function originRepo(cwd) {
 }
 
 /** Returns { repo, number } for a comment-posting tool call, null for anything else. */
+// `gh pr comment`, `gh issue review` and the like, with gh's own flags allowed before the
+// subcommand (`gh --repo owner/name pr comment 12`).
+const GH_COMMENT = /\bgh(?:\s+(?:-R|--repo)[\s=]+\S+)*\s+(?:pr|issue)\s+(?:comment|review)\b/;
+
 export function targetOf(input, cwdRepo) {
   const name = input.tool_name ?? '';
   const ti = input.tool_input ?? {};
   if (name === 'Bash') {
     const cmd = ti.command ?? '';
     const api = cmd.match(/repos\/([\w.-]+\/[\w.-]+)\/(?:issues|pulls)\/(\d+)\/(?:comments|reviews)/);
-    if (api) return { repo: api[1], number: Number(api[2]) };
-    const cli = cmd.match(/gh\s+(?:pr|issue)\s+(?:comment|review)\s+(\d+)/);
-    if (cli) {
-      const r = cmd.match(/(?:-R|--repo)[\s=]+([\w.-]+\/[\w.-]+)/);
-      return { repo: r ? r[1] : cwdRepo, number: Number(cli[1]) };
+    if (api) {
+      // gh api reads unless told to write: a GET that merely mentions Greptile is not a request.
+      const method = cmd.match(/(?:-X|--method)[\s=]+(\w+)/i);
+      const writes = method ? !/^GET$/i.test(method[1]) : /\s(?:-f|-F|--field|--raw-field|--input)[\s=]/.test(cmd);
+      return writes ? { repo: api[1], number: Number(api[2]) } : null;
     }
-    if (/gh\s+(?:pr|issue)\s+(?:comment|review)\b/.test(cmd) || /gh\s+api\b[\s\S]*\/(comments|reviews)\b/.test(cmd)) {
+    const cli = cmd.match(new RegExp(`${GH_COMMENT.source}\\s+(\\d+)`));
+    if (cli) {
+      // An explicit repository wins, quoted or not; one that is named but cannot be read is not
+      // replaced by the starting checkout's.
+      const named = /(?:^|\s)(?:-R|--repo)[\s=]/.test(cmd);
+      const r = cmd.match(/(?:-R|--repo)[\s=]+["']?([\w.-]+\/[\w.-]+)["']?(?=\s|$)/);
+      // After a cd the starting checkout says nothing about which repository gh will post to.
+      const moved = /(?:^|[;&|(]\s*)(?:cd|pushd)\s/.test(cmd);
+      return { repo: r ? r[1] : named || moved ? null : cwdRepo, number: Number(cli[1]) };
+    }
+    // A comment command this cannot place is still a comment: refuse it rather than wave it through.
+    if (GH_COMMENT.test(cmd) || /gh\s+api\b[\s\S]*\/(comments|reviews)\b/.test(cmd)) {
       return { repo: null, number: null };
     }
     return null;
@@ -179,14 +232,65 @@ export function targetOf(input, cwdRepo) {
   return { repo, number: number != null ? Number(number) : null };
 }
 
+/** Files a posting command takes its body from: gh --body-file / -F <file>, gh api -F body=@<file>. */
+export function bodyFiles(cmd) {
+  const out = [];
+  const unquote = (x) => x.replace(/^['"]|['"]$/g, '');
+  for (const m of cmd.matchAll(/--body-file[=\s]+(\S+)/g)) out.push(unquote(m[1]));
+  for (const m of cmd.matchAll(/\s-F\s+(\S+)/g)) {
+    const v = unquote(m[1]);
+    if (!v.includes('=')) out.push(v);
+    else if (v.includes('=@')) out.push(v.slice(v.indexOf('=@') + 2));
+  }
+  for (const m of cmd.matchAll(/\s-f\s+\w+=@(\S+)/g)) out.push(unquote(m[1]));
+  return out;
+}
+
+/** The one place a round request belongs: a new top-level comment on the PR. */
+export function isTopLevelComment(input) {
+  const name = input.tool_name ?? '';
+  if (name === 'Bash') {
+    const cmd = input.tool_input?.command ?? '';
+    if (/\bgh(?:\s+(?:-R|--repo)[\s=]+\S+)*\s+(?:pr|issue)\s+comment\b/.test(cmd) && !/--edit-last\b/.test(cmd)) return true;
+    return /repos\/[\w.-]+\/[\w.-]+\/issues\/\d+\/comments\b/.test(cmd);
+  }
+  return /add_issue_comment$/.test(name);
+}
+
 /** Hook entry point. Returns { block: boolean, message: string }. */
-export function evaluateHook(input, { api = ghApi, cwdRepo = null } = {}) {
-  const text = input.tool_name === 'Bash' ? input.tool_input?.command : JSON.stringify(input.tool_input ?? {});
+export function evaluateHook(input, { api = ghApi, cwdRepo = null, readFile = (p) => readFileSync(p, 'utf8') } = {}) {
+  // The raw strings, not their JSON: escaping turns line breaks into text and joins the lines.
+  let text = input.tool_name === 'Bash'
+    ? input.tool_input?.command ?? ''
+    : Object.values(input.tool_input ?? {}).filter((v) => typeof v === 'string').join('\n');
+  // A body read from a file is invisible in the command: read it, and refuse what cannot be read.
+  if (input.tool_name === 'Bash' && targetOf(input, cwdRepo)) {
+    for (const file of bodyFiles(text)) {
+      try {
+        text += `\n${readFile(resolve(input.cwd ?? process.cwd(), file))}`;
+      } catch {
+        return {
+          block: true,
+          message: `Greptile review rounds: could not read the comment body from ${file}, so it was not checked. Pass the body inline with --body, or post it with the GitHub MCP comment tool.`,
+        };
+      }
+    }
+  }
   if (!mentionsGreptile(text) && !forbiddenRequest(text)) return { block: false, message: '' };
   const target = targetOf(input, cwdRepo);
   if (!target) return { block: false, message: '' };
   if (forbiddenRequest(text)) {
     return { block: true, message: 'Greptile review rounds: never ask for "plus"/"apex" reviews (3 and 10 credits) or run /greploop. Post a plain @greptileai.' };
+  }
+  // The request is one top-level PR comment. Anywhere else (a thread reply, a review, an edited
+  // comment) the mention is a quote, and Greptile still reads it as a request and bills it.
+  if (!isTopLevelComment(input)) {
+    return {
+      block: true,
+      message:
+        'Greptile review rounds: this text mentions @greptileai outside a top-level PR comment. Greptile treats any ' +
+        'comment carrying the mention as a review request, quoted or not. Reword it without the mention.',
+    };
   }
   if (!target.repo || !target.number) {
     return {

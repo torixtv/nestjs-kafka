@@ -1,7 +1,7 @@
 // node --test .claude/hooks/greptile-round-guard.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decide, evaluateHook, forbiddenRequest, gather, parseSummary, targetOf, unansweredThreads, repoFromRemote } from './greptile-round-guard.mjs';
+import { bodyFiles, decide, evaluateHook, forbiddenRequest, gather, parseSummary, targetOf, unansweredThreads, repoFromRemote } from './greptile-round-guard.mjs';
 
 const HEAD = '1b549eef4b87c2aea143eed843be568d4846809a';
 const OLD = 'd18c44ff9ad8177d6bcc4c6131749e4e58e6a14c';
@@ -89,6 +89,33 @@ test('evaluateHook runs the rules against GitHub data', () => {
   assert.match(r.message, /1 Greptile thread\(s\) have no reply/);
 });
 
+test('the mention is refused anywhere but a top-level PR comment, whatever the PR state', () => {
+  // Greptile bills a mention in a thread reply as a request: the reply that explains a fix by
+  // quoting the mention must not go out. No GitHub read is needed to refuse it.
+  const noApi = () => { throw new Error('should not read GitHub'); };
+  const reply = { tool_name: 'mcp__github__add_reply_to_pull_request_comment', tool_input: { owner: 'torixtv', repo: 'x', pullNumber: 9, commentId: 1, body: 'Fixed: a plain `@greptileai` now waits for CI.' } };
+  assert.equal(evaluateHook(reply, { api: noApi }).block, true);
+  assert.match(evaluateHook(reply, { api: noApi }).message, /outside a top-level PR comment/);
+  const review = { tool_name: 'mcp__github__pull_request_review_write', tool_input: { owner: 'torixtv', repo: 'x', pullNumber: 9, body: 'see @greptileai' } };
+  assert.equal(evaluateHook(review, { api: noApi }).block, true);
+  const threadApi = { tool_name: 'Bash', tool_input: { command: 'gh api repos/torixtv/x/pulls/9/comments -f body="@greptileai"' } };
+  assert.equal(evaluateHook(threadApi, { api: noApi }).block, true);
+  const edit = { tool_name: 'Bash', tool_input: { command: 'gh pr comment 9 --repo torixtv/x --edit-last --body "@greptileai"' } };
+  assert.equal(evaluateHook(edit, { api: noApi }).block, true);
+  // A top-level comment goes on to the round rules (here: GitHub cannot be read, so not checked).
+  const top = { tool_name: 'mcp__github__add_issue_comment', tool_input: { owner: 'torixtv', repo: 'x', issue_number: 9, body: '@greptileai' } };
+  assert.match(evaluateHook(top, { api: noApi }).message, /not checked/);
+});
+
+test("gh's own flags before the subcommand do not hide a comment", () => {
+  const cmd = (c) => ({ tool_name: 'Bash', tool_input: { command: c } });
+  assert.deepEqual(targetOf(cmd("gh --repo torixtv/gitops pr comment 1050 --body 'hi'"), null), { repo: 'torixtv/gitops', number: 1050 });
+  assert.deepEqual(targetOf(cmd('gh -R torixtv/gitops pr comment 7 --body hi'), null), { repo: 'torixtv/gitops', number: 7 });
+  // the round rules run for it (GitHub unreadable here, so it is reported as not checked)
+  const failing = () => { throw new Error('offline'); };
+  assert.match(evaluateHook(cmd("gh --repo torixtv/gitops pr comment 1050 --body '@greptileai'"), { api: failing }).message, /not checked/);
+});
+
 test('every paid-tier wording is forbidden, a plain request is not', () => {
   for (const t of ['@greptileai plus', '@greptileai apex', '@greptileai review this at plus', '@greptileai please review at APEX']) {
     assert.equal(forbiddenRequest(t), true, t);
@@ -108,4 +135,83 @@ test('a commit status counts as CI', () => {
   assert.equal(decide(gather('torixtv/t', 2, api('pending'))).verdict, 'blocked');
   assert.equal(decide(gather('torixtv/t', 2, api('failure'))).verdict, 'blocked');
   assert.equal(decide(gather('torixtv/t', 2, api('success'))).verdict, 'request-ok');
+});
+
+test('a first review that ran on an earlier commit and posted nothing does not hold the PR forever', () => {
+  const api = (earlier) => (path) => {
+    if (path === 'repos/torixtv/r/pulls/3') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
+    if (path.startsWith(`repos/torixtv/r/commits/${HEAD}/check-runs`)) return { check_runs: green };
+    if (path.endsWith('/status')) return { statuses: [] };
+    if (path.startsWith('repos/torixtv/r/pulls/3/commits')) return [{ sha: OLD }, { sha: HEAD }];
+    if (path.startsWith(`repos/torixtv/r/commits/${OLD}/check-runs`)) return { check_runs: earlier };
+    return [];
+  };
+  const done = [{ name: 'Greptile Review', status: 'completed', conclusion: 'success' }];
+  assert.equal(decide(gather('torixtv/r', 3, api(done))).verdict, 'request-ok');
+  assert.equal(decide(gather('torixtv/r', 3, api([]))).verdict, 'blocked');
+});
+
+test('a body read from a file is checked, and one that cannot be read is refused', () => {
+  assert.deepEqual(bodyFiles('gh pr comment 4 --body-file note.md'), ['note.md']);
+  assert.deepEqual(bodyFiles('gh pr comment 4 -F "note.md"'), ['note.md']);
+  assert.deepEqual(bodyFiles('gh api repos/o/r/issues/4/comments -F body=@note.md'), ['note.md']);
+  assert.deepEqual(bodyFiles('gh api repos/o/r/issues/4/comments -F per_page=5'), []);
+  const call = { tool_name: 'Bash', cwd: '/w', tool_input: { command: 'gh pr comment 4 --repo torixtv/x --body-file note.md' } };
+  const paid = evaluateHook(call, { readFile: () => '@greptileai review this at apex' });
+  assert.equal(paid.block, true);
+  assert.match(paid.message, /plus|apex/);
+  const unreadable = evaluateHook(call, { readFile: () => { throw new Error('ENOENT'); } });
+  assert.equal(unreadable.block, true);
+  assert.match(unreadable.message, /could not read/);
+  assert.equal(evaluateHook(call, { readFile: () => 'thanks, fixed' }).block, false);
+});
+
+test('a request already waiting for Greptile, or a head CI has not reached yet, holds the next one', () => {
+  assert.equal(decide(state({ pendingRequest: true })).verdict, 'blocked');
+  assert.equal(decide(state({ checks: [], headAgeMs: 60 * 1000 })).verdict, 'blocked');
+  assert.equal(decide(state({ checks: [], headAgeMs: 60 * 60 * 1000 })).verdict, 'request-ok'); // a repo with no CI at all
+  const now = Date.parse('2026-10-24T23:00:00Z');
+  const api = (requestAt, checkStartedAt) => (path) => {
+    if (path === 'repos/torixtv/q/pulls/5') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
+    if (path.startsWith(`repos/torixtv/q/commits/${HEAD}/check-runs`)) {
+      return { check_runs: [...green, ...(checkStartedAt ? [{ name: 'Greptile Review', status: 'completed', conclusion: 'success', started_at: checkStartedAt }] : [])] };
+    }
+    if (path.endsWith('/status')) return { statuses: [] };
+    if (path === `repos/torixtv/q/commits/${HEAD}`) return { commit: { committer: { date: '2026-10-24T20:00:00Z' } } };
+    if (path.startsWith('repos/torixtv/q/issues/5/comments')) {
+      return [
+        { user: { login: 'greptile-apps[bot]', type: 'Bot' }, body: SUMMARY(4, 1, OLD), created_at: '2026-10-24T21:00:00Z', updated_at: '2026-10-24T21:00:00Z' },
+        { user: { login: 'dan', type: 'User' }, body: '@greptileai', created_at: requestAt },
+      ];
+    }
+    return [];
+  };
+  assert.equal(gather('torixtv/q', 5, api('2026-10-24T22:55:00Z'), now).pendingRequest, true);
+  assert.equal(gather('torixtv/q', 5, api('2026-10-24T22:55:00Z', '2026-10-24T22:56:00Z'), now).pendingRequest, false); // picked up
+  assert.equal(gather('torixtv/q', 5, api('2026-10-24T21:30:00Z'), now).pendingRequest, false); // stale: Greptile never came
+});
+
+test('only comment writes are checked, and a cd hides the target repository', () => {
+  const cmd = (c) => ({ tool_name: 'Bash', tool_input: { command: c } });
+  assert.equal(targetOf(cmd("gh api repos/torixtv/x/issues/3/comments --jq '.[] | select(.body | test(\"@greptileai\"))'"), null), null);
+  assert.equal(targetOf(cmd('gh api -X GET repos/torixtv/x/issues/3/comments -f per_page=100'), null), null);
+  assert.deepEqual(targetOf(cmd('gh api repos/torixtv/x/issues/3/comments -f body=hi'), null), { repo: 'torixtv/x', number: 3 });
+  assert.deepEqual(targetOf(cmd('gh api --method POST repos/torixtv/x/issues/3/comments --input b.json'), null), { repo: 'torixtv/x', number: 3 });
+  assert.deepEqual(targetOf(cmd('cd ../other && gh pr comment 12 --body hi'), 'torixtv/here'), { repo: null, number: 12 });
+  assert.deepEqual(targetOf(cmd('cd ../other && gh pr comment 12 --repo torixtv/other --body hi'), 'torixtv/here'), { repo: 'torixtv/other', number: 12 });
+});
+
+test('a quoted repository is read, and a named one that cannot be read is not swapped for the checkout', () => {
+  const cmd = (c) => ({ tool_name: 'Bash', tool_input: { command: c } });
+  assert.deepEqual(targetOf(cmd('gh pr comment 4 --repo "torixtv/catalog-service" --body hi'), 'torixtv/here'), { repo: 'torixtv/catalog-service', number: 4 });
+  assert.deepEqual(targetOf(cmd("gh pr comment 4 -R 'torixtv/catalog-service' --body hi"), 'torixtv/here'), { repo: 'torixtv/catalog-service', number: 4 });
+  assert.deepEqual(targetOf(cmd('gh pr comment 4 --repo "$REPO" --body hi'), 'torixtv/here'), { repo: null, number: 4 });
+});
+
+test('an MCP body is checked line by line, as written', () => {
+  const failing = () => { throw new Error('offline'); };
+  const call = (body) => ({ tool_name: 'mcp__github__add_issue_comment', tool_input: { owner: 'torixtv', repo: 'x', issue_number: 9, body } });
+  // a plain request with the word on a later line is not a paid one
+  assert.match(evaluateHook(call('@greptileai\nThe plus button is fixed.'), { api: failing }).message, /not checked/);
+  assert.equal(evaluateHook(call('@greptileai review this at plus'), { api: failing }).block, true);
 });

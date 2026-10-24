@@ -203,6 +203,10 @@ reviews. These rules replace that with rounds you start on purpose.
 7. If round 3 still has findings, stop and ask a person before requesting a fourth.
 8. Never write `at plus` or `at apex` in a request (3 and 10 credits), never run `/greploop`, and
    never close and reopen a PR to get a review.
+9. Write the mention in no comment but the one request: not in a thread reply, a review or a PR
+   description, not even quoted in backticks. Greptile reads any comment that carries it as a
+   request, tier words included. On 2026-10-24 six replies that quoted the tier wording to explain
+   a fix each bought an unplanned apex review.
 
 `node .claude/hooks/greptile-round-guard.mjs status [torixtv/<repo> <number>]` checks a PR against
 these rules and prints what to do next; any agent can run it. In Claude Code the `greptile-round`
