@@ -18,6 +18,9 @@ test('parseSummary reads score, review count and last reviewed commit', () => {
 
 test('a fixed, pushed, answered round may be requested', () => {
   assert.equal(decide(state()).verdict, 'request-ok');
+  // A first review that finished without posting a summary does not hold the PR forever.
+  const done = { name: 'Greptile Review', status: 'completed', conclusion: 'failure' };
+  assert.equal(decide(state({ summary: null, checks: [...green, done] })).verdict, 'request-ok');
 });
 
 test('each rule blocks on its own', () => {
@@ -30,6 +33,7 @@ test('each rule blocks on its own', () => {
     'unanswered thread': { unanswered: 1 },
     'nothing changed': { summary: parseSummary(SUMMARY(4, 2, HEAD)) },
     'round limit': { summary: parseSummary(SUMMARY(4, 3, OLD)) },
+    'first review not posted yet': { summary: null },
   };
   for (const [name, extra] of Object.entries(cases)) {
     assert.equal(decide(state(extra)).verdict, 'blocked', name);
@@ -62,6 +66,8 @@ test('evaluateHook blocks plus/apex and unresolvable targets, and fails open whe
   const call = (command) => ({ tool_name: 'Bash', tool_input: { command } });
   assert.equal(evaluateHook(call('gh pr comment 1 --repo torixtv/x --body "@greptileai plus"')).block, true);
   assert.equal(evaluateHook(call('gh pr comment --body "@greptileai"')).block, true);
+  assert.equal(evaluateHook(call('gh pr comment 1 --repo torixtv/x --body /greploop')).block, true);
+  assert.equal(evaluateHook(call("grep -n '/greploop' AGENTS.md")).block, false);
   const failing = () => { throw new Error('gh: not found'); };
   const r = evaluateHook(call('gh pr comment 1 --repo torixtv/x --body "@greptileai"'), { api: failing });
   assert.equal(r.block, false);

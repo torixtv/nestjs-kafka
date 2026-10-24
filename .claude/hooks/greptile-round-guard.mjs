@@ -75,6 +75,9 @@ export function decide({ pr, checks, summary, unanswered }) {
   if (red.length) reasons.push(`CI is red: ${[...new Set(red)].join(', ')}`);
   if (running.length) reasons.push(`CI is still running: ${[...new Set(running)].join(', ')}`);
   if (unanswered > 0) reasons.push(`${unanswered} Greptile thread(s) have no reply`);
+  if (!summary && greptile.length === 0) {
+    reasons.push('Greptile has not posted its first review yet: marking the PR ready starts round 1, so wait for it');
+  }
 
   const reviewedHead = summary && sameCommit(summary.lastReviewedSha, pr.headSha);
   if (summary && reviewedHead) {
@@ -169,7 +172,7 @@ export function targetOf(input, cwdRepo) {
 /** Hook entry point. Returns { block: boolean, message: string }. */
 export function evaluateHook(input, { api = ghApi, cwdRepo = null } = {}) {
   const text = input.tool_name === 'Bash' ? input.tool_input?.command : JSON.stringify(input.tool_input ?? {});
-  if (!mentionsGreptile(text)) return { block: false, message: '' };
+  if (!mentionsGreptile(text) && !forbiddenRequest(text)) return { block: false, message: '' };
   const target = targetOf(input, cwdRepo);
   if (!target) return { block: false, message: '' };
   if (forbiddenRequest(text)) {
