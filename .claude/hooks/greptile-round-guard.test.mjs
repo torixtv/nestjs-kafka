@@ -1,7 +1,7 @@
 // node --test .claude/hooks/greptile-round-guard.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decide, evaluateHook, parseSummary, targetOf, unansweredThreads, repoFromRemote } from './greptile-round-guard.mjs';
+import { decide, evaluateHook, forbiddenRequest, gather, parseSummary, targetOf, unansweredThreads, repoFromRemote } from './greptile-round-guard.mjs';
 
 const HEAD = '1b549eef4b87c2aea143eed843be568d4846809a';
 const OLD = 'd18c44ff9ad8177d6bcc4c6131749e4e58e6a14c';
@@ -79,6 +79,7 @@ test('evaluateHook runs the rules against GitHub data', () => {
   const api = (path) => {
     if (path === 'repos/torixtv/x/pulls/9') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
     if (path.startsWith(`repos/torixtv/x/commits/${HEAD}/check-runs`)) return { check_runs: green };
+    if (path === `repos/torixtv/x/commits/${HEAD}/status`) return { statuses: [] };
     if (path.startsWith('repos/torixtv/x/issues/9/comments')) return [{ user: { login: 'greptile-apps[bot]' }, body: SUMMARY(4, 1, OLD) }];
     if (path.startsWith('repos/torixtv/x/pulls/9/comments')) return [{ id: 5, user: { login: 'greptile-apps[bot]', type: 'Bot' } }];
     throw new Error(`unexpected ${path}`);
@@ -86,4 +87,25 @@ test('evaluateHook runs the rules against GitHub data', () => {
   const r = evaluateHook({ tool_name: 'mcp__github__add_issue_comment', tool_input: { owner: 'torixtv', repo: 'x', issue_number: 9, body: '@greptileai' } }, { api });
   assert.equal(r.block, true);
   assert.match(r.message, /1 Greptile thread\(s\) have no reply/);
+});
+
+test('every paid-tier wording is forbidden, a plain request is not', () => {
+  for (const t of ['@greptileai plus', '@greptileai apex', '@greptileai review this at plus', '@greptileai please review at APEX']) {
+    assert.equal(forbiddenRequest(t), true, t);
+  }
+  assert.equal(forbiddenRequest('@greptileai'), false);
+  assert.equal(forbiddenRequest('@greptileai\nthe plus button moved'), false);
+});
+
+test('a commit status counts as CI', () => {
+  const api = (status) => (path) => {
+    if (path === 'repos/torixtv/t/pulls/2') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
+    if (path.includes('/check-runs')) return { check_runs: green };
+    if (path.endsWith('/status')) return { statuses: [{ context: 'Terraform Cloud/torix', state: status }] };
+    if (path.includes('/issues/2/comments')) return [{ user: { login: 'greptile-apps[bot]' }, body: SUMMARY(4, 1, OLD) }];
+    return [];
+  };
+  assert.equal(decide(gather('torixtv/t', 2, api('pending'))).verdict, 'blocked');
+  assert.equal(decide(gather('torixtv/t', 2, api('failure'))).verdict, 'blocked');
+  assert.equal(decide(gather('torixtv/t', 2, api('success'))).verdict, 'request-ok');
 });

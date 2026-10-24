@@ -24,8 +24,10 @@ const FAILED = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 
 const COMMENT_TOOLS = /(add_issue_comment|add_reply_to_pull_request_comment|update_issue_comment|add_comment_to_pending_review|pull_request_review_write)$/;
 
 export const mentionsGreptile = (text) => /@greptileai\b/i.test(text ?? '');
+// A paid tier, in any wording that names it after the mention ("@greptileai plus",
+// "@greptileai review this at apex"), and /greploop.
 export const forbiddenRequest = (text) =>
-  /@greptileai\s+(plus|apex)\b/i.test(text ?? '') || /(^|\s)\/greploop\b/i.test(text ?? '');
+  /@greptileai\b[^\n]*?\b(plus|apex)\b/i.test(text ?? '') || /(^|\s)\/greploop\b/i.test(text ?? '');
 
 /** Reads score, review count and last reviewed commit out of Greptile's summary comment. */
 export function parseSummary(body) {
@@ -122,6 +124,14 @@ export function gather(repo, number, api = ghApi) {
     status: c.status,
     conclusion: c.conclusion,
   }));
+  // Some CI reports through commit statuses instead (Terraform Cloud, for one): count them too.
+  for (const st of api(`repos/${repo}/commits/${pr.headSha}/status`).statuses ?? []) {
+    checks.push({
+      name: st.context,
+      status: st.state === 'pending' ? 'in_progress' : 'completed',
+      conclusion: st.state === 'success' ? 'success' : 'failure',
+    });
+  }
   const comments = pages(api, `repos/${repo}/issues/${number}/comments`);
   const summaryComment = comments
     .filter((c) => c.user?.login === GREPTILE_LOGIN && /Confidence Score/i.test(c.body ?? ''))
