@@ -5,11 +5,12 @@
 
 Greptile reviews a pull request once, when it is opened ready for review or marked ready. It does
 not review pushes. Every further review costs $1 and starts only when someone comments
-`@greptileai` on the PR. A PR is ready to merge when Greptile's summary comment shows 5/5, no
-Greptile thread is left without a reply, and the summary's "Last reviewed commit" is the PR's head
-commit. Measured over the month to 2026-10-23: 91% of repeat reviews came from pushes to PRs that
-were already open for review, and a quarter of PRs took three or more reviews. These rules replace
-that with rounds you start on purpose.
+`@greptileai` on the PR. A reviewed PR is ready to merge when Greptile's summary comment shows
+5/5, no Greptile thread is left without a reply, and the summary's "Last reviewed commit" is the
+PR's head commit. A PR labelled `skip-greptile` gets no summary and waits for none: it merges on
+green CI and the usual human review. Measured over the month to 2026-10-23: 91% of repeat reviews
+came from pushes to PRs that were already open for review, and a quarter of PRs took three or more
+reviews. These rules replace that with rounds you start on purpose.
 
 1. Open the PR as a draft and keep it a draft while you work. Mark it ready only when the change is
    complete and CI is green. That starts round 1.
