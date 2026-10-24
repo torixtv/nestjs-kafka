@@ -28,4 +28,9 @@ reviews. These rules replace that with rounds you start on purpose.
 7. If round 3 still has findings, stop and ask a person before requesting a fourth.
 8. Never write `at plus` or `at apex` in a request (3 and 10 credits), never run `/greploop`, and
    never close and reopen a PR to get a review.
+
+`node .claude/hooks/greptile-round-guard.mjs status [torixtv/<repo> <number>]` checks a PR against
+these rules and prints what to do next; any agent can run it. In Claude Code the `greptile-round`
+skill wraps it, and a PreToolUse hook in `.claude/settings.json` blocks an `@greptileai` comment
+that breaks them.
 <!-- greptile-rounds:end -->
