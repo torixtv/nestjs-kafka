@@ -34,8 +34,9 @@ or more reviews. These rules replace that with rounds you start on purpose.
    request, tier words included. On 2026-10-24 six replies that quoted the tier wording to explain
    a fix each bought an unplanned apex review.
 
-`node .claude/hooks/greptile-round-guard.mjs status [torixtv/<repo> <number>]` checks a PR against
-these rules and prints what to do next; any agent can run it. In Claude Code the `greptile-round`
-skill wraps it, and a PreToolUse hook in `.claude/settings.json` blocks an `@greptileai` comment
-that breaks them.
+Claude Code: install the `greptile-round` plugin once with
+`/plugin install greptile-round --marketplace torixtv/claude-plugins`. Its `/greptile-round` skill checks a PR
+against these rules and says what to do next, and its hook blocks an `@greptileai` comment that breaks them.
+Any other agent or person can run the same check from a checkout of torixtv/claude-plugins:
+`node plugins/greptile-round/hooks/greptile-round-guard.mjs status torixtv/<repo> <number>`.
 <!-- greptile-rounds:end -->
