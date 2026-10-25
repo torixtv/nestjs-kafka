@@ -75,7 +75,7 @@ export function decide({ pr, checks, summary, unanswered, pendingRequest = false
 
   const greptile = checks.filter((c) => c.name === GREPTILE_CHECK);
   const ci = checks.filter((c) => c.name !== GREPTILE_CHECK);
-  if (greptile.some((c) => c.status !== 'completed')) reasons.push('a Greptile review is running on the head commit');
+  if (greptile.some((c) => c.status !== 'completed')) reasons.push('a Greptile review is running on this PR');
   const red = ci.filter((c) => c.status === 'completed' && FAILED.has(c.conclusion)).map((c) => c.name);
   const running = ci.filter((c) => c.status !== 'completed').map((c) => c.name);
   if (red.length) reasons.push(`CI is red: ${[...new Set(red)].join(', ')}`);
@@ -146,15 +146,18 @@ export function gather(repo, number, api = ghApi, now = Date.now()) {
   const summaryComment = comments
     .filter((c) => c.user?.login === GREPTILE_LOGIN && /Confidence Score/i.test(c.body ?? ''))
     .at(-1);
-  // No summary and no Greptile check on the head: either the first review has not started, or it
-  // ran on an earlier commit and posted nothing. Pushes start no review, so look back before
-  // telling anyone to wait for one.
-  if (!summaryComment && !checks.some((c) => c.name === GREPTILE_CHECK)) {
+  // Greptile reviews the commit that was head when the round started, so after a push its check
+  // sits on an earlier commit. Look back while the head shows none: a review still running there
+  // must hold the next request even when an older summary exists, and with no summary at all a
+  // first review that ran there and posted nothing must not be mistaken for one never started.
+  if (!checks.some((c) => c.name === GREPTILE_CHECK)) {
     const shas = api(`repos/${repo}/pulls/${number}/commits?per_page=100`).map((c) => c.sha).filter((sha) => sha !== pr.headSha);
     for (const sha of shas.slice(-10).reverse()) {
       const earlier = api(`repos/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent(GREPTILE_CHECK)}`).check_runs ?? [];
       if (earlier.length) {
-        checks.push(...earlier.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion })));
+        const found = earlier.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion, startedAt: c.started_at }));
+        // With a summary, only a review still running matters; a finished one is what the summary reports.
+        checks.push(...(summaryComment ? found.filter((c) => c.status !== 'completed') : found));
         break;
       }
     }
@@ -168,10 +171,13 @@ export function gather(repo, number, api = ghApi, now = Date.now()) {
     const at = Date.parse(c.created_at ?? 0) || 0;
     return c.user?.type !== 'Bot' && mentionsGreptile(c.body) && at > lastReview && now - at < REQUEST_WAIT_MS && !started.some((t) => t >= at);
   });
+  // How long the head has been on the PR. A commit's own date can be long before its push, so the
+  // PR's last update counts too (a push updates it); the later of the two is the safe one.
   let headAgeMs = null;
   try {
     const date = api(`repos/${repo}/commits/${pr.headSha}`).commit?.committer?.date;
-    if (date) headAgeMs = now - Date.parse(date);
+    const newest = Math.max(Date.parse(date ?? 0) || 0, Date.parse(raw.updated_at ?? 0) || 0);
+    if (newest) headAgeMs = now - newest;
   } catch {
     // Unknown age: fall back to the check list alone.
   }
@@ -232,17 +238,20 @@ export function targetOf(input, cwdRepo) {
   return { repo, number: number != null ? Number(number) : null };
 }
 
-/** Files a posting command takes its body from: gh --body-file / -F <file>, gh api -F body=@<file>. */
+/** Files a posting command takes its body from: gh --body-file / -F <file>, gh api -F body=@<file> or --input <file>. */
 export function bodyFiles(cmd) {
   const out = [];
-  const unquote = (x) => x.replace(/^['"]|['"]$/g, '');
-  for (const m of cmd.matchAll(/--body-file[=\s]+(\S+)/g)) out.push(unquote(m[1]));
-  for (const m of cmd.matchAll(/\s-F\s+(\S+)/g)) {
-    const v = unquote(m[1]);
+  // One shell argument: double-quoted, single-quoted (spaces kept) or bare.
+  const ARG = String.raw`(?:"([^"]*)"|'([^']*)'|(\S+))`;
+  const value = (m, i) => m[i] ?? m[i + 1] ?? m[i + 2];
+  for (const m of cmd.matchAll(new RegExp(`--body-file[=\\s]+${ARG}`, 'g'))) out.push(value(m, 1));
+  for (const m of cmd.matchAll(new RegExp(`--input[=\\s]+${ARG}`, 'g'))) out.push(value(m, 1));
+  for (const m of cmd.matchAll(new RegExp(`\\s-F\\s+${ARG}`, 'g'))) {
+    const v = value(m, 1);
     if (!v.includes('=')) out.push(v);
     else if (v.includes('=@')) out.push(v.slice(v.indexOf('=@') + 2));
   }
-  for (const m of cmd.matchAll(/\s-f\s+\w+=@(\S+)/g)) out.push(unquote(m[1]));
+  for (const m of cmd.matchAll(new RegExp(`\\s-f\\s+\\w+=@${ARG}`, 'g'))) out.push(value(m, 1));
   return out;
 }
 

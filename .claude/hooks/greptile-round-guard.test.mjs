@@ -80,6 +80,8 @@ test('evaluateHook runs the rules against GitHub data', () => {
     if (path === 'repos/torixtv/x/pulls/9') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
     if (path.startsWith(`repos/torixtv/x/commits/${HEAD}/check-runs`)) return { check_runs: green };
     if (path === `repos/torixtv/x/commits/${HEAD}/status`) return { statuses: [] };
+    if (path.startsWith('repos/torixtv/x/pulls/9/commits')) return [{ sha: HEAD }];
+    if (path === `repos/torixtv/x/commits/${HEAD}`) return { commit: { committer: { date: '2026-10-24T20:00:00Z' } } };
     if (path.startsWith('repos/torixtv/x/issues/9/comments')) return [{ user: { login: 'greptile-apps[bot]' }, body: SUMMARY(4, 1, OLD) }];
     if (path.startsWith('repos/torixtv/x/pulls/9/comments')) return [{ id: 5, user: { login: 'greptile-apps[bot]', type: 'Bot' } }];
     throw new Error(`unexpected ${path}`);
@@ -214,4 +216,47 @@ test('an MCP body is checked line by line, as written', () => {
   // a plain request with the word on a later line is not a paid one
   assert.match(evaluateHook(call('@greptileai\nThe plus button is fixed.'), { api: failing }).message, /not checked/);
   assert.equal(evaluateHook(call('@greptileai review this at plus'), { api: failing }).block, true);
+});
+
+test('a body sent with gh api --input is checked too', () => {
+  assert.deepEqual(bodyFiles('gh api repos/o/r/issues/4/comments --input request.json'), ['request.json']);
+  const call = { tool_name: 'Bash', cwd: '/w', tool_input: { command: 'gh api repos/torixtv/x/issues/4/comments --input request.json' } };
+  assert.equal(evaluateHook(call, { readFile: () => JSON.stringify({ body: '@greptileai review this at apex' }) }).block, true);
+});
+
+test('a review still running on an earlier commit holds the next request, even with an older summary', () => {
+  const api = (earlierStatus) => (path) => {
+    if (path === 'repos/torixtv/s/pulls/6') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
+    if (path.startsWith(`repos/torixtv/s/commits/${HEAD}/check-runs`)) return { check_runs: green };
+    if (path.endsWith('/status')) return { statuses: [] };
+    if (path === `repos/torixtv/s/commits/${HEAD}`) return { commit: { committer: { date: '2026-10-24T20:00:00Z' } } };
+    if (path.startsWith('repos/torixtv/s/issues/6/comments')) return [{ user: { login: 'greptile-apps[bot]', type: 'Bot' }, body: SUMMARY(4, 1, OLD) }];
+    if (path.startsWith('repos/torixtv/s/pulls/6/commits')) return [{ sha: OLD }, { sha: HEAD }];
+    if (path.startsWith(`repos/torixtv/s/commits/${OLD}/check-runs`)) return { check_runs: [{ name: 'Greptile Review', status: earlierStatus, conclusion: earlierStatus === 'completed' ? 'success' : null }] };
+    return [];
+  };
+  const now = Date.parse('2026-10-24T23:00:00Z');
+  assert.equal(decide(gather('torixtv/s', 6, api('in_progress'), now)).verdict, 'blocked');
+  assert.equal(decide(gather('torixtv/s', 6, api('completed'), now)).verdict, 'request-ok'); // the summary already reports it
+});
+
+test('a quoted body-file path keeps its spaces', () => {
+  assert.deepEqual(bodyFiles('gh pr comment 4 --body-file "review note.md"'), ['review note.md']);
+  assert.deepEqual(bodyFiles("gh pr comment 4 -F 'my notes/review note.md'"), ['my notes/review note.md']);
+  assert.deepEqual(bodyFiles('gh api repos/o/r/issues/4/comments --input "req body.json"'), ['req body.json']);
+});
+
+test('the wait for CI counts from the push, not from an old commit date', () => {
+  const now = Date.parse('2026-10-24T23:00:00Z');
+  const api = (path) => {
+    // committed two hours ago, pushed (PR updated) two minutes ago, no CI registered yet
+    if (path === 'repos/torixtv/p/pulls/8') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [], updated_at: '2026-10-24T22:58:00Z' };
+    if (path.startsWith(`repos/torixtv/p/commits/${HEAD}/check-runs`)) return { check_runs: [] };
+    if (path.endsWith('/status')) return { statuses: [] };
+    if (path === `repos/torixtv/p/commits/${HEAD}`) return { commit: { committer: { date: '2026-10-24T21:00:00Z' } } };
+    if (path.startsWith('repos/torixtv/p/issues/8/comments')) return [{ user: { login: 'greptile-apps[bot]', type: 'Bot' }, body: SUMMARY(4, 1, OLD) }];
+    if (path.startsWith('repos/torixtv/p/pulls/8/commits')) return [{ sha: HEAD }];
+    return [];
+  };
+  assert.equal(decide(gather('torixtv/p', 8, api, now)).verdict, 'blocked');
 });
