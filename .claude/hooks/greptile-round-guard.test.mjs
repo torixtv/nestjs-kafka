@@ -16,8 +16,10 @@ test('parseSummary reads score, review count and last reviewed commit', () => {
   assert.equal(parseSummary(''), null);
 });
 
-test('a fixed, pushed, answered round may be requested', () => {
+test('a fixed, pushed, answered round may be requested, and so may the first one', () => {
   assert.equal(decide(state()).verdict, 'request-ok');
+  // Greptile reviews nothing on its own: a ready, green PR with no review yet asks for round 1.
+  assert.equal(decide(state({ summary: null })).verdict, 'request-ok');
   // A first review that finished without posting a summary does not hold the PR forever.
   const done = { name: 'Greptile Review', status: 'completed', conclusion: 'failure' };
   assert.equal(decide(state({ summary: null, checks: [...green, done] })).verdict, 'request-ok');
@@ -33,16 +35,15 @@ test('each rule blocks on its own', () => {
     'unanswered thread': { unanswered: 1 },
     'nothing changed': { summary: parseSummary(SUMMARY(4, 2, HEAD)) },
     'round limit': { summary: parseSummary(SUMMARY(4, 3, OLD)) },
-    'first review not posted yet': { summary: null },
+    'first review running': { summary: null, checks: [...green, { name: 'Greptile Review', status: 'queued', conclusion: null }] },
   };
   for (const [name, extra] of Object.entries(cases)) {
     assert.equal(decide(state(extra)).verdict, 'blocked', name);
   }
 });
 
-test('5/5 on the head with no open thread is done, skip-greptile is skipped, the extra-round label lifts the limit', () => {
+test('5/5 on the head with no open thread is done, the extra-round label lifts the limit', () => {
   assert.equal(decide(state({ summary: parseSummary(SUMMARY(5, 4, HEAD)) })).verdict, 'done');
-  assert.equal(decide(state({ pr: pr({ labels: ['skip-greptile'] }) })).verdict, 'skipped');
   assert.equal(decide(state({ pr: pr({ labels: ['greptile-extra-round'] }), summary: parseSummary(SUMMARY(4, 5, OLD)) })).verdict, 'request-ok');
 });
 
@@ -139,7 +140,7 @@ test('a commit status counts as CI', () => {
   assert.equal(decide(gather('torixtv/t', 2, api('success'))).verdict, 'request-ok');
 });
 
-test('a first review that ran on an earlier commit and posted nothing does not hold the PR forever', () => {
+test('a first review on an earlier commit holds the next request only while it runs', () => {
   const api = (earlier) => (path) => {
     if (path === 'repos/torixtv/r/pulls/3') return { state: 'open', draft: false, head: { sha: HEAD }, labels: [] };
     if (path.startsWith(`repos/torixtv/r/commits/${HEAD}/check-runs`)) return { check_runs: green };
@@ -150,7 +151,8 @@ test('a first review that ran on an earlier commit and posted nothing does not h
   };
   const done = [{ name: 'Greptile Review', status: 'completed', conclusion: 'success' }];
   assert.equal(decide(gather('torixtv/r', 3, api(done))).verdict, 'request-ok');
-  assert.equal(decide(gather('torixtv/r', 3, api([]))).verdict, 'blocked');
+  assert.equal(decide(gather('torixtv/r', 3, api([]))).verdict, 'request-ok');
+  assert.equal(decide(gather('torixtv/r', 3, api([{ name: 'Greptile Review', status: 'in_progress', conclusion: null }]))).verdict, 'blocked');
 });
 
 test('a body read from a file is checked, and one that cannot be read is refused', () => {

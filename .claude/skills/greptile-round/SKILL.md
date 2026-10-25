@@ -1,11 +1,11 @@
 ---
 name: greptile-round
-description: Use when a pull request is being prepared for review, when a Greptile review lands, before commenting @greptileai, or when deciding whether a PR is ready to merge. Checks the PR against the Greptile review-round rules (draft until ready, one request per round, 5/5 on the head commit) and says what to do next.
+description: Use when a pull request is being prepared for review, when a Greptile review lands, before commenting @greptileai, or when deciding whether a PR is ready to merge. Checks the PR against the Greptile review-round rules (reviews start only by comment, one request per round, 5/5 on the head commit) and says what to do next.
 ---
 
 # Greptile review rounds
 
-The rules are in the "Greptile review rounds" section of this repository's `AGENTS.md` / `CLAUDE.md`. This skill applies them to one PR.
+The rules are in the "Greptile review rounds" section of this repository's `AGENTS.md` / `CLAUDE.md`. This skill applies them to one PR. Greptile reviews nothing automatically: every round, the first included, is one `@greptileai` comment.
 
 ## 1. Check where the PR stands
 
@@ -20,15 +20,14 @@ It prints CI on the head commit, Greptile's latest score and review count, wheth
 
 | Verdict | Meaning | Do |
 |---|---|---|
-| `blocked: the PR is a draft` | Greptile has not been asked yet | Finish the change and get CI green, then mark the PR ready. That starts round 1. A docs-only, lockfile-only, back-merge or revert PR gets the `skip-greptile` label first. |
+| `blocked: the PR is a draft` | Not ready for review | Finish the change, get CI green, mark it ready, then request round 1. |
 | `blocked: a Greptile review is running` | A round is in progress | Wait. Do not push and do not comment. |
 | `blocked: N Greptile thread(s) have no reply` | Findings are open | Read every finding in the summary, fix the whole set, run the checks, push, then reply on every thread (fixed in `<sha>`, or why not). |
 | `blocked: CI is red` / `CI is still running` | The head is not green | Fix or wait. Never ask for a round on a red head. |
 | `blocked: nothing changed since the last review` | The last review already covers the head | Push the fixes first. |
-| `blocked: this PR has had N reviews` | Round 3 is used up | Stop and ask a person. They can post `@greptileai` themselves or add the `greptile-extra-round` label. |
-| `request-ok` | The round is fixed, pushed, answered and green | Comment `@greptileai` once, plain: never `plus`, `apex` or `/greploop`. |
+| `blocked: this PR has had N reviews` | Round 3 is used up | Stop and ask a person. They can post the request themselves or add the `greptile-extra-round` label. |
+| `request-ok` | Ready, green, and nothing outstanding | If the PR needs a review, comment `@greptileai` once, plain: never `plus`, `apex` or `/greploop`. A docs-only, lockfile-only, back-merge or revert PR needs none. |
 | `done` | 5/5 on the head commit, every thread answered | Stop. Do not push unless the change needs it: any push means another round. |
-| `skipped` | Labelled `skip-greptile` | It merges on green CI and the usual human review. |
 
 ## 3. The hook
 

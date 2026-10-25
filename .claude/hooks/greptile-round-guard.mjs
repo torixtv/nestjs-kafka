@@ -18,7 +18,6 @@ import { pathToFileURL } from 'node:url';
 
 export const GREPTILE_LOGIN = 'greptile-apps[bot]';
 export const GREPTILE_CHECK = 'Greptile Review';
-export const SKIP_LABEL = 'skip-greptile';
 export const EXTRA_ROUND_LABEL = 'greptile-extra-round';
 export const ROUND_LIMIT = 3;
 const CI_GRACE_MS = 15 * 60 * 1000; // how long a fresh head may show no CI before none is assumed
@@ -67,10 +66,7 @@ export function decide({ pr, checks, summary, unanswered, pendingRequest = false
   const labels = pr.labels ?? [];
   if (pr.state !== 'open') return { verdict: 'blocked', reasons: ['the PR is not open'] };
   if (pr.draft) {
-    return { verdict: 'blocked', reasons: ['the PR is a draft; marking it ready starts round 1 on its own'] };
-  }
-  if (labels.includes(SKIP_LABEL)) {
-    return { verdict: 'skipped', reasons: [`the PR is labelled ${SKIP_LABEL}: it merges on green CI without a review`] };
+    return { verdict: 'blocked', reasons: ['the PR is a draft: finish the change, get CI green and mark it ready first'] };
   }
 
   const greptile = checks.filter((c) => c.name === GREPTILE_CHECK);
@@ -85,9 +81,6 @@ export function decide({ pr, checks, summary, unanswered, pendingRequest = false
   // Right after a push no check run exists yet, and an empty list is not a green one.
   if (ci.length === 0 && headAgeMs !== null && headAgeMs < CI_GRACE_MS) {
     reasons.push('no CI has reported on the head commit yet: wait for it');
-  }
-  if (!summary && greptile.length === 0) {
-    reasons.push('Greptile has not posted its first review yet: marking the PR ready starts round 1, so wait for it');
   }
 
   const reviewedHead = summary && sameCommit(summary.lastReviewedSha, pr.headSha);
