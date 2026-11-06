@@ -129,40 +129,87 @@ jobs:
           echo "Dry run - would publish version $PACKAGE_VERSION"
           npm publish --dry-run
 
-      # Publish to GitHub Packages
+      # Publish to GitHub Packages. Skipped when the version is already there, so a
+      # re-run after a later step failed gets past this step instead of failing on
+      # "cannot publish over the previously published version".
       - name: Publish to GitHub Packages
         if: github.event.inputs.dry_run != 'true'
-        run: npm publish --access public
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          # E404 means "not published yet". Any other failure (auth, network) stops the
+          # run: reading it as "missing" would try to publish over a version that exists.
+          if FOUND=$(npm view "$NAME@$PACKAGE_VERSION" version 2>"$RUNNER_TEMP/npm-view.err"); then
+            if [ "$FOUND" = "$PACKAGE_VERSION" ]; then
+              echo "::notice::$NAME@$PACKAGE_VERSION is already on GitHub Packages, skipping"
+              exit 0
+            fi
+          elif ! grep -q E404 "$RUNNER_TEMP/npm-view.err"; then
+            cat "$RUNNER_TEMP/npm-view.err"
+            echo "::error::Could not check GitHub Packages for $NAME@$PACKAGE_VERSION"
+            exit 1
+          fi
+          npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Reconfigure for npmjs.com with OIDC Trusted Publishing
+      # Reconfigure for npmjs.com with OIDC Trusted Publishing. This step and the npm
+      # upgrade also run in dry runs, so a dry run catches a broken toolchain before a
+      # real release has published to GitHub Packages and then stopped halfway.
       - name: Setup Node.js for npmjs
-        if: github.event.inputs.dry_run != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
           scope: '@torixtv'
 
-      # Upgrade npm to support OIDC trusted publishing (requires npm 11.5.1+)
+      # Trusted publishing needs npm 11.5.1+. Pinned to major 11 rather than `latest`:
+      # npm 12 requires Node ^22.22.2 || ^24.15.0 || >=26 and failed to install here.
       - name: Upgrade npm for OIDC support
-        if: github.event.inputs.dry_run != 'true'
-        run: npm install -g npm@latest
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
 
-      # Publish to npmjs.com using OIDC Trusted Publishing (no token needed)
+      # Publish to npmjs.com using OIDC Trusted Publishing (no token needed). Skipped
+      # when the version is already public, so a re-run can still push the tag and the
+      # version bump. curl so that the check needs no registry credentials.
       - name: Publish to npmjs
         if: github.event.inputs.dry_run != 'true'
-        run: npm publish --registry https://registry.npmjs.org --access public --provenance
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          # A transport failure prints 000 and lands in the error branch below.
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${NAME/\//%2f}/$PACKAGE_VERSION" || true)
+          case "$STATUS" in
+            200)
+              echo "::notice::$NAME@$PACKAGE_VERSION is already on npmjs, skipping"
+              exit 0
+              ;;
+            404) ;;
+            *)
+              echo "::error::npmjs answered HTTP $STATUS for $NAME@$PACKAGE_VERSION"
+              exit 1
+              ;;
+          esac
+          npm publish --registry https://registry.npmjs.org --access public --provenance
 
       - name: Create Git tag (manual dispatch only)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
         run: |
+          # ls-remote exits 2 when the tag is absent; any other failure stops the run.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$PACKAGE_VERSION" >/dev/null; then
+            echo "::notice::Tag v$PACKAGE_VERSION already exists, skipping"
+            exit 0
+          else
+            RC=$?
+            if [ "$RC" -ne 2 ]; then
+              echo "::error::git ls-remote failed with exit code $RC"
+              exit 1
+            fi
+          fi
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git tag -a "v$PACKAGE_VERSION" -m "Release v$PACKAGE_VERSION"
           git push origin "v$PACKAGE_VERSION"
-
+          
       - name: Update package-lock.json
         if: (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true') || github.event_name == 'release'
         run: |
